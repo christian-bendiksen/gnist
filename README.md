@@ -213,8 +213,14 @@ gnist list
 gnist current
 gnist reload
 gnist wallpaper
+gnist wallpaper ~/Pictures/background.png
 gnist update
 ```
+
+`gnist wallpaper` advances through the active theme's backgrounds. Pass an
+image path to select that file directly. Gnist waits briefly for the
+session-managed Awww daemon, applies the image, then updates its background
+symlink.
 
 Run `gnist COMMAND --help` for all command-specific options.
 

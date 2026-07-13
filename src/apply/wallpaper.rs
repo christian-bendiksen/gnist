@@ -1,10 +1,12 @@
-//! Cycles theme wallpapers with `awww`.
+//! Selects and cycles wallpapers with `awww`.
 use crate::{ctx::Ctx, theme::Theme, util};
-use anyhow::Result;
+use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    thread,
+    time::Duration,
 };
 
 fn canonical_str(path: &Path) -> Option<String> {
@@ -26,10 +28,28 @@ pub fn run(ctx: &Ctx, theme: &Theme) -> Result<()> {
     let current = canonical_str(&ctx.background_link);
 
     let next = pick_next(&candidates, current.as_deref());
+    change_wallpaper(next)?;
     util::symlink_force(next, &ctx.background_link)?;
-
-    change_wallpaper(&ctx.background_link);
     Ok(())
+}
+
+/// Select an exact image independently of the active theme's wallpaper cycle.
+pub fn set(ctx: &Ctx, image: &Path) -> Result<()> {
+    let image = resolve_image(image)?;
+    change_wallpaper(&image)?;
+    util::symlink_force(&image, &ctx.background_link)?;
+    Ok(())
+}
+
+fn resolve_image(path: &Path) -> Result<PathBuf> {
+    let image = fs::canonicalize(path)
+        .with_context(|| format!("resolve wallpaper {}", path.display()))?;
+    ensure!(
+        image.is_file(),
+        "wallpaper is not a regular file: {}",
+        path.display()
+    );
+    Ok(image)
 }
 
 struct Candidate {
@@ -85,19 +105,41 @@ fn pick_next<'a>(candidates: &'a [Candidate], current: Option<&str>) -> &'a Path
     &candidates[idx].path
 }
 
-fn change_wallpaper(path: &Path) {
-    Command::new("awww")
-        .args([
-            "img",
-            &path.to_string_lossy(),
-            "--transition-type=fade",
-            "--transition-duration=0.6",
-        ])
+fn change_wallpaper(path: &Path) -> Result<()> {
+    wait_for_awww()?;
+
+    let status = Command::new("awww")
+        .arg("img")
+        .arg(path)
+        .args(["--transition-type=fade", "--transition-duration=0.6"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .ok();
+        .status()
+        .context("apply wallpaper with awww")?;
+    ensure!(status.success(), "awww failed to apply wallpaper");
+    Ok(())
+}
+
+fn wait_for_awww() -> Result<()> {
+    for attempt in 0..4 {
+        let status = Command::new("awww")
+            .arg("query")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .context("query awww daemon")?;
+        if status.success() {
+            return Ok(());
+        }
+
+        if attempt < 3 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    bail!("awww daemon did not become ready")
 }
 
 fn notify(msg: &str) {
@@ -108,4 +150,30 @@ fn notify(msg: &str) {
         .stderr(Stdio::null())
         .status()
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_image;
+    use std::fs;
+
+    #[test]
+    fn resolve_image_canonicalizes_regular_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("wallpaper.png");
+        fs::write(&image, b"image").unwrap();
+
+        assert_eq!(
+            resolve_image(&image).unwrap(),
+            fs::canonicalize(image).unwrap()
+        );
+    }
+
+    #[test]
+    fn resolve_image_rejects_missing_paths_and_directories() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(resolve_image(&dir.path().join("missing.png")).is_err());
+        assert!(resolve_image(dir.path()).is_err());
+    }
 }

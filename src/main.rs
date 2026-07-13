@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod apply;
 mod ctx;
@@ -76,8 +76,8 @@ enum Cmd {
         skip_icons: bool,
     },
 
-    /// Switch to the next wallpaper in the active theme
-    Wallpaper,
+    /// Switch to the next wallpaper, or apply IMAGE directly
+    Wallpaper { image: Option<PathBuf> },
 }
 
 fn main() -> Result<()> {
@@ -121,10 +121,13 @@ fn main() -> Result<()> {
             apply::gnome::run(&theme, skip_icons);
             Ok(())
         }
-        Cmd::Wallpaper => {
-            let theme = Theme::load_current(&ctx)?;
-            apply::wallpaper::run(&ctx, &theme)
-        }
+        Cmd::Wallpaper { image } => match image {
+            Some(image) => apply::wallpaper::set(&ctx, &image),
+            None => {
+                let theme = Theme::load_current(&ctx)?;
+                apply::wallpaper::run(&ctx, &theme)
+            }
+        },
     }
 }
 
