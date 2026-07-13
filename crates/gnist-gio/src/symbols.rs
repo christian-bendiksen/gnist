@@ -4,6 +4,7 @@ use std::sync::OnceLock;
 use crate::config::GtkApi;
 
 pub type GetMajorVersion = unsafe extern "C" fn() -> u32;
+pub type IsInitialized = unsafe extern "C" fn() -> i32;
 pub type CssProviderNew = unsafe extern "C" fn() -> *mut c_void;
 pub type CssProviderLoadGtk4 = unsafe extern "C" fn(*mut c_void, *const c_char);
 pub type CssProviderLoadGtk3 = unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_void) -> i32;
@@ -41,6 +42,7 @@ pub struct GList {
 /// APIs and fade helpers remain optional so one build can support GTK 3 and 4.
 pub struct CoreSyms {
     pub gtk_get_major_version: GetMajorVersion,
+    pub gtk_is_initialized: Option<IsInitialized>,
     pub gtk_css_provider_new: CssProviderNew,
     pub gtk_css_provider_load_from_path_gtk4: Option<CssProviderLoadGtk4>,
     pub gtk_css_provider_load_from_path_gtk3: Option<CssProviderLoadGtk3>,
@@ -71,6 +73,7 @@ pub fn core() -> Option<&'static CoreSyms> {
     let symbols = unsafe {
         CoreSyms {
             gtk_get_major_version: symbol(b"gtk_get_major_version\0")?,
+            gtk_is_initialized: symbol(b"gtk_is_initialized\0"),
             gtk_css_provider_new: symbol(b"gtk_css_provider_new\0")?,
             gtk_css_provider_load_from_path_gtk4: symbol(b"gtk_css_provider_load_from_path\0"),
             gtk_css_provider_load_from_path_gtk3: symbol(b"gtk_css_provider_load_from_path\0"),
@@ -98,6 +101,17 @@ pub fn core() -> Option<&'static CoreSyms> {
 
     let _ = CORE.set(symbols);
     CORE.get()
+}
+
+/// GTK 4.20 made calling into GDK before `gtk_init()` a fatal error, so the
+/// module must not touch GDK until the host has initialized GTK. GTK 3 does
+/// not export the probe and has no such check, so it counts as initialized.
+pub fn gtk_initialized() -> bool {
+    let Some(symbols) = core() else { return false };
+    match symbols.gtk_is_initialized {
+        Some(is_initialized) => (unsafe { is_initialized() }) != 0,
+        None => true,
+    }
 }
 
 pub fn detected_gtk() -> Option<(u32, Option<GtkApi>)> {

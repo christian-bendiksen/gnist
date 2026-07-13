@@ -78,6 +78,13 @@ fn attach_or_retry(attempt: u32) {
         return;
     };
 
+    // Remote GApplication instances never run gtk_init(); retries expire
+    // harmlessly before such a process exits.
+    if !symbols::gtk_initialized() {
+        retry_or_skip(attempt, "GTK not initialized");
+        return;
+    }
+
     ox_log!(
         "attach {gtk} display={} version={}",
         std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),

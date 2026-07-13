@@ -105,7 +105,14 @@ pub fn attach(gtk: GtkApi) {
 
     let Some(symbols) = symbols::core() else { return };
     let Some(owner) = gtk_owner(symbols, gtk) else {
-        wait_for_display(gtk);
+        // gdk_display_manager_get() aborts on GTK >= 4.20 unless gtk_init()
+        // has run, and once it has the default display already exists, so
+        // waiting for display-opened only makes sense on GTK 3.
+        if gtk.is_gtk3() {
+            wait_for_display(gtk);
+        } else {
+            ox_log!("{gtk} has no default display; skipping attach");
+        }
         return;
     };
 
