@@ -1,0 +1,26 @@
+[workspace]
+members  = [".", "crates/gnist-gio"]
+resolver = "2"
+
+[package]
+name = "gnist"
+version = "0.3.4"
+edition = "2024"
+description = "Atomic theme switcher for Wayland desktops"
+license = "MIT"
+
+[dependencies]
+anyhow    = { version = "1", features = ["backtrace"] }
+clap      = { version = "4", features = ["derive"] }
+tempfile  = "3"
+toml      = { version = "0.8", default-features = false, features = ["parse"] }
+kdl       = "^6"
+walkdir   = "2"
+rustix    = { version = "1", features = ["fs"] }
+
+[profile.release]
+strip         = true
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+panic         = "abort"

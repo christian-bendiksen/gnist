@@ -1,0 +1,15 @@
+[package]
+name        = "gnist-gio"
+version     = "0.1.0"
+edition     = "2024"
+license     = "LGPL-2.1-or-later"
+description = "GIO module for gnist GTK CSS live-reload"
+
+[lib]
+name       = "gnist_gio"
+crate-type = ["cdylib"]
+
+[dependencies]
+glib = "0.20"
+gio  = "0.20"
+libc = "0.2"
