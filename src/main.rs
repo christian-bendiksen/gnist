@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 mod apply;
@@ -16,6 +16,30 @@ use transaction::Transaction;
 
 use crate::apply::ApplyFlags;
 
+#[derive(Args, Debug, Clone, Copy)]
+struct IntegrationOptions {
+    #[arg(long)]
+    skip_apply: bool,
+    #[arg(long)]
+    skip_gnome: bool,
+    #[arg(long)]
+    skip_icons: bool,
+    #[arg(long)]
+    skip_reload: bool,
+}
+
+impl IntegrationOptions {
+    fn apply_flags(self, skip_wallpaper: bool) -> ApplyFlags {
+        ApplyFlags {
+            skip_apply: self.skip_apply,
+            skip_gnome: self.skip_gnome,
+            skip_icons: self.skip_icons,
+            skip_reload: self.skip_reload,
+            skip_wallpaper,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "gnist", about = "Atomic Wayland theme switcher")]
 struct Cli {
@@ -31,16 +55,19 @@ enum Cmd {
     /// Render and apply an installed theme
     Set {
         theme: String,
-        #[arg(long)]
-        skip_apply: bool,
-        #[arg(long)]
-        skip_gnome: bool,
-        #[arg(long)]
-        skip_icons: bool,
-        #[arg(long)]
-        skip_reload: bool,
+        #[command(flatten)]
+        integrations: IntegrationOptions,
         #[arg(long)]
         skip_wallpaper: bool,
+    },
+
+    /// Re-render and apply the current theme
+    Reapply {
+        #[command(flatten)]
+        integrations: IntegrationOptions,
+        /// Advance and apply the current theme's wallpaper
+        #[arg(long)]
+        wallpaper: bool,
     },
 
     /// Show installed themes
@@ -88,29 +115,22 @@ fn main() -> Result<()> {
         Cmd::Init => cmd_init(&ctx),
         Cmd::Set {
             theme,
-            skip_apply,
-            skip_gnome,
-            skip_icons,
-            skip_reload,
+            integrations,
             skip_wallpaper,
-        } => cmd_set(
-            &ctx,
-            &theme,
-            apply::ApplyFlags {
-                skip_apply,
-                skip_gnome,
-                skip_icons,
-                skip_reload,
-                skip_wallpaper,
-            },
-        ),
+        } => cmd_set(&ctx, &theme, integrations.apply_flags(skip_wallpaper)),
+        Cmd::Reapply {
+            integrations,
+            wallpaper,
+        } => cmd_reapply(&ctx, integrations.apply_flags(!wallpaper)),
         Cmd::List => cmd_list(&ctx),
         Cmd::Current => cmd_current(&ctx),
         Cmd::Install { url } => {
             let name = install::run(&ctx, &url).context("install theme")?;
             cmd_set(&ctx, &name, ApplyFlags::default())
         }
-        Cmd::Remove { theme, yes, force } => cmd_remove(&ctx, &theme, yes, force),
+        Cmd::Remove { theme, yes, force } => {
+            cmd_remove(&ctx, &theme, yes, force, ApplyFlags::default())
+        }
         Cmd::Update { theme } => cmd_update(&ctx, theme.as_deref()),
         Cmd::Reload => {
             apply::reload::run(&ctx);
@@ -150,11 +170,32 @@ fn cmd_init(ctx: &Ctx) -> Result<()> {
 }
 
 fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> {
-    let theme = Theme::load(&ctx.data_dir, theme_name).context("load theme")?;
+    let theme = Theme::load(ctx, theme_name).context("load theme")?;
 
+    publish_theme(ctx, &theme)?;
+
+    // The selected theme is persistent state, not part of the rendered tree.
+    std::fs::write(&ctx.current_theme_file, format!("{}\n", theme.name))
+        .context("write current.theme")?;
+
+    apply_theme(ctx, &theme, flags)
+}
+
+fn cmd_reapply(ctx: &Ctx, flags: apply::ApplyFlags) -> Result<()> {
+    let theme = Theme::load_current(ctx)?;
+    publish_theme(ctx, &theme)?;
+    apply_theme(ctx, &theme, flags)
+}
+
+fn publish_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
     let txn = Transaction::begin(ctx).context("begin transaction")?;
+    let template_dirs: Vec<PathBuf> = ctx
+        .source_roots
+        .iter()
+        .map(|root| root.join("templates"))
+        .collect();
     render::engine::render_all(
-        &ctx.templates_dir,
+        &template_dirs,
         &ctx.user_templates_dir,
         &theme.root,
         txn.stage(),
@@ -163,11 +204,10 @@ fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> 
     .context("render templates")?;
     theme.stage(txn.stage()).context("stage assets")?;
     txn.commit().context("commit transaction")?;
+    Ok(())
+}
 
-    // The selected theme is persistent state, not part of the rendered tree.
-    std::fs::write(&ctx.current_theme_file, format!("{}\n", theme.name))
-        .context("write current.theme")?;
-
+fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()> {
     if flags.skip_apply {
         return Ok(());
     }
@@ -176,19 +216,21 @@ fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> 
     // the Gnist GIO module.
     apply::gtk_css::refresh_user_css_links(ctx);
 
-    if let Err(e) = apply::gtk_css::emit_current(ctx, Some(&theme)) {
+    if let Err(e) = apply::gtk_css::emit_current(ctx, Some(theme)) {
         eprintln!("warn: gtk-css reload failed: {e:#}");
     }
 
     if !flags.skip_gnome {
-        apply::gnome::run(&theme, flags.skip_icons);
+        apply::gnome::run(theme, flags.skip_icons);
     }
 
     if !flags.skip_reload {
         apply::reload::run(ctx);
     }
 
-    if !flags.skip_wallpaper && let Err(e) = apply::wallpaper::run(ctx, &theme) {
+    if !flags.skip_wallpaper
+        && let Err(e) = apply::wallpaper::run(ctx, theme)
+    {
         eprintln!("warn: wallpaper apply failed: {e:#}");
     }
 
@@ -197,8 +239,7 @@ fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> 
 
 fn cmd_list(ctx: &Ctx) -> Result<()> {
     let current = read_current_name(ctx);
-    let mut names = list_installed(&ctx.data_dir)?;
-    names.sort();
+    let names = theme::list_names(ctx)?;
 
     if names.is_empty() {
         eprintln!("No themes installed in {}", ctx.data_dir.display());
@@ -230,15 +271,28 @@ fn cmd_current(ctx: &Ctx) -> Result<()> {
     }
 }
 
-fn cmd_remove(ctx: &Ctx, name: &str, yes: bool, force: bool) -> Result<()> {
-    let path = ctx.data_dir.join(name);
-    if !path.is_dir() {
-        anyhow::bail!("theme not found: {}", path.display());
-    }
+fn cmd_remove(
+    ctx: &Ctx,
+    name: &str,
+    yes: bool,
+    force: bool,
+    apply_flags: ApplyFlags,
+) -> Result<()> {
+    let path = config_theme_path(ctx, name, "remove")?;
+    let removing_current = read_current_name(ctx).as_deref() == Some(name);
 
-    if !force && read_current_name(ctx).as_deref() == Some(name) {
+    if !force && removing_current {
         anyhow::bail!("'{name}' is the current theme. Set another theme or use --force");
     }
+
+    let fallback = if removing_current {
+        lower_theme_root(ctx, name)
+            .map(|root| Theme::load_root(root, name))
+            .transpose()
+            .context("load lower-precedence replacement theme")?
+    } else {
+        None
+    };
 
     if !yes {
         eprint!("Remove '{name}'  ({})? [y/N] ", path.display());
@@ -253,7 +307,27 @@ fn cmd_remove(ctx: &Ctx, name: &str, yes: bool, force: bool) -> Result<()> {
         }
     }
 
-    std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+    if removing_current {
+        if let Some(theme) = fallback {
+            publish_theme(ctx, &theme).context("publish lower-precedence replacement theme")?;
+            std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+            remove_file_if_exists(&ctx.background_link)?;
+            apply_theme(
+                ctx,
+                &theme,
+                ApplyFlags {
+                    skip_wallpaper: false,
+                    ..apply_flags
+                },
+            )?;
+        } else {
+            std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+            clear_current_state(ctx)?;
+        }
+    } else {
+        std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+    }
+
     println!("Removed {name}");
     Ok(())
 }
@@ -261,10 +335,7 @@ fn cmd_remove(ctx: &Ctx, name: &str, yes: bool, force: bool) -> Result<()> {
 fn cmd_update(ctx: &Ctx, theme: Option<&str>) -> Result<()> {
     let targets: Vec<String> = match theme {
         Some(name) => {
-            let path = ctx.data_dir.join(name);
-            if !path.is_dir() {
-                anyhow::bail!("theme not found: {}", path.display());
-            }
+            config_theme_path(ctx, name, "update")?;
             vec![name.to_owned()]
         }
         None => list_installed(&ctx.data_dir)?
@@ -307,6 +378,59 @@ fn cmd_update(ctx: &Ctx, theme: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn config_theme_path(ctx: &Ctx, name: &str, operation: &str) -> Result<PathBuf> {
+    let path = ctx.data_dir.join(name);
+    if path.is_dir() {
+        return Ok(path);
+    }
+
+    if let Some(lower) = lower_theme_root(ctx, name) {
+        anyhow::bail!(
+            "cannot {operation} theme '{name}': it is visible only from lower-precedence source {}; only config-installed themes in {} can be modified",
+            lower.display(),
+            ctx.data_dir.display()
+        );
+    }
+
+    anyhow::bail!("theme not found: {}", path.display())
+}
+
+fn lower_theme_root(ctx: &Ctx, name: &str) -> Option<PathBuf> {
+    ctx.source_roots
+        .iter()
+        .skip(1)
+        .map(|source| source.join("data").join(name))
+        .find(|root| root.is_dir())
+}
+
+fn clear_current_state(ctx: &Ctx) -> Result<()> {
+    remove_file_if_exists(&ctx.current_theme_file)?;
+    remove_file_if_exists(&ctx.current_link)?;
+
+    match std::fs::symlink_metadata(&ctx.live_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() => std::fs::remove_dir_all(&ctx.live_dir)
+            .with_context(|| format!("remove {}", ctx.live_dir.display()))?,
+        Ok(_) => std::fs::remove_file(&ctx.live_dir)
+            .with_context(|| format!("remove {}", ctx.live_dir.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", ctx.live_dir.display()));
+        }
+    }
+
+    remove_file_if_exists(&ctx.background_link)?;
+
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
 fn list_installed(data_dir: &Path) -> Result<Vec<String>> {
     let rd = match std::fs::read_dir(data_dir) {
         Ok(rd) => rd,
@@ -324,4 +448,209 @@ fn read_current_name(ctx: &Ctx) -> Option<String> {
     let raw = std::fs::read_to_string(&ctx.current_theme_file).ok()?;
     let trimmed = raw.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Cmd, cmd_reapply, cmd_remove, cmd_set, cmd_update, read_current_name};
+    use crate::{apply::ApplyFlags, ctx::Ctx, theme::Theme};
+    use clap::Parser;
+    use std::{ffi::OsStr, fs};
+
+    fn test_ctx(dir: &tempfile::TempDir) -> Ctx {
+        let config_home = dir.path().join("config");
+        let data_home = dir.path().join("data");
+        Ctx::from_xdg(
+            dir.path(),
+            Some(config_home.as_os_str()),
+            Some(data_home.as_os_str()),
+            Some(OsStr::new("")),
+        )
+    }
+
+    fn write_theme(root: &std::path::Path, name: &str, accent: &str) {
+        let theme = root.join("data").join(name);
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(
+            theme.join("colors.toml"),
+            format!("accent = \"{accent}\"\n"),
+        )
+        .unwrap();
+    }
+
+    fn skip_apply() -> ApplyFlags {
+        ApplyFlags {
+            skip_apply: true,
+            skip_wallpaper: true,
+            ..ApplyFlags::default()
+        }
+    }
+
+    #[test]
+    fn reapply_skips_wallpaper_by_default_and_can_opt_in() {
+        let cli = Cli::try_parse_from(["gnist", "reapply", "--skip-icons"]).unwrap();
+        let Cmd::Reapply {
+            integrations,
+            wallpaper,
+        } = cli.cmd
+        else {
+            panic!("expected reapply command");
+        };
+        let flags = integrations.apply_flags(!wallpaper);
+        assert!(flags.skip_icons);
+        assert!(flags.skip_wallpaper);
+
+        let cli = Cli::try_parse_from(["gnist", "reapply", "--wallpaper"]).unwrap();
+        let Cmd::Reapply {
+            integrations,
+            wallpaper,
+        } = cli.cmd
+        else {
+            panic!("expected reapply command");
+        };
+        assert!(!integrations.apply_flags(!wallpaper).skip_wallpaper);
+    }
+
+    #[test]
+    fn reapply_fails_clearly_without_a_current_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+
+        let error = cmd_reapply(&ctx, skip_apply()).unwrap_err();
+
+        assert!(error.to_string().contains("current theme is not set"));
+    }
+
+    #[test]
+    fn reapply_republishes_fallback_theme_without_changing_current_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        let data_root = &ctx.source_roots[1];
+        let theme = data_root.join("data/active");
+        let templates = data_root.join("templates");
+        fs::create_dir_all(&theme).unwrap();
+        fs::create_dir_all(&templates).unwrap();
+        fs::create_dir_all(ctx.current_theme_file.parent().unwrap()).unwrap();
+        fs::write(theme.join("colors.toml"), "accent = \"#123456\"\n").unwrap();
+        fs::write(templates.join("app.conf.tpl"), "accent={{ accent }}\n").unwrap();
+        fs::write(&ctx.current_theme_file, "active\n").unwrap();
+
+        cmd_reapply(&ctx, skip_apply()).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "accent=#123456\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&ctx.current_theme_file).unwrap(),
+            "active\n"
+        );
+    }
+
+    #[test]
+    fn named_lower_layer_themes_have_specific_mutation_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        write_theme(&ctx.source_roots[1], "shared", "#222222");
+
+        for (operation, error) in [
+            (
+                "remove",
+                cmd_remove(&ctx, "shared", true, true, skip_apply()).unwrap_err(),
+            ),
+            ("update", cmd_update(&ctx, Some("shared")).unwrap_err()),
+        ] {
+            let diagnostic = error.to_string();
+            assert!(diagnostic.contains(&format!("cannot {operation} theme 'shared'")));
+            assert!(diagnostic.contains("lower-precedence source"));
+            assert!(diagnostic.contains(&ctx.source_roots[1].display().to_string()));
+            assert!(diagnostic.contains(&ctx.data_dir.display().to_string()));
+            assert!(!diagnostic.contains("not found"));
+        }
+    }
+
+    #[test]
+    fn force_removing_current_override_republishes_lower_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        write_theme(&ctx.source_roots[0], "shared", "#111111");
+        write_theme(&ctx.source_roots[1], "shared", "#222222");
+        fs::create_dir_all(&ctx.templates_dir).unwrap();
+        fs::write(
+            ctx.templates_dir.join("app.conf.tpl"),
+            "accent={{ accent }}\n",
+        )
+        .unwrap();
+        cmd_set(&ctx, "shared", skip_apply()).unwrap();
+        fs::write(&ctx.background_link, "stale background").unwrap();
+
+        cmd_remove(&ctx, "shared", true, true, skip_apply()).unwrap();
+
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("shared"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "accent=#222222\n"
+        );
+        assert_eq!(
+            Theme::load_current(&ctx).unwrap().root,
+            ctx.source_roots[1].join("data/shared")
+        );
+        assert!(fs::symlink_metadata(&ctx.background_link).is_err());
+    }
+
+    #[test]
+    fn fallback_render_failure_preserves_current_publication_and_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        write_theme(&ctx.source_roots[0], "shared", "#111111");
+        write_theme(&ctx.source_roots[1], "shared", "#222222");
+        fs::create_dir_all(&ctx.templates_dir).unwrap();
+        fs::write(
+            ctx.templates_dir.join("app.conf.tpl"),
+            "accent={{ accent }}\n",
+        )
+        .unwrap();
+        cmd_set(&ctx, "shared", skip_apply()).unwrap();
+        fs::write(ctx.templates_dir.join("broken.tpl"), [0xff]).unwrap();
+        fs::write(&ctx.background_link, "current background").unwrap();
+
+        let error = cmd_remove(&ctx, "shared", true, true, skip_apply()).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("publish lower-precedence replacement theme")
+        );
+        assert!(ctx.source_roots[0].join("data/shared").is_dir());
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("shared"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "accent=#111111\n"
+        );
+        assert!(ctx.current_link.join("app.conf").is_file());
+        assert_eq!(
+            fs::read_to_string(&ctx.background_link).unwrap(),
+            "current background"
+        );
+    }
+
+    #[test]
+    fn force_removing_current_theme_without_fallback_clears_active_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(&dir);
+        write_theme(&ctx.source_roots[0], "only", "#111111");
+        fs::create_dir_all(&ctx.templates_dir).unwrap();
+        fs::write(ctx.templates_dir.join("app.conf.tpl"), "configured\n").unwrap();
+        cmd_set(&ctx, "only", skip_apply()).unwrap();
+        fs::write(&ctx.background_link, "stale background").unwrap();
+
+        cmd_remove(&ctx, "only", true, true, skip_apply()).unwrap();
+
+        assert_eq!(read_current_name(&ctx), None);
+        assert!(fs::symlink_metadata(&ctx.current_theme_file).is_err());
+        assert!(fs::symlink_metadata(&ctx.current_link).is_err());
+        assert!(fs::symlink_metadata(&ctx.live_dir).is_err());
+        assert!(fs::symlink_metadata(&ctx.background_link).is_err());
+        assert!(Theme::load_current(&ctx).is_err());
+    }
 }

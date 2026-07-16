@@ -73,7 +73,9 @@ fn generate_from_alacritty(theme_dir: &Path) -> Option<String> {
 }
 
 fn fallback(map: &mut HashMap<String, String>, key: &str, source: &str) {
-    if !map.contains_key(key) && let Some(val) = map.get(source).cloned() {
+    if !map.contains_key(key)
+        && let Some(val) = map.get(source).cloned()
+    {
         map.insert(key.to_owned(), val);
     }
 }

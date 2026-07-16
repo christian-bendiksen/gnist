@@ -42,8 +42,8 @@ pub fn set(ctx: &Ctx, image: &Path) -> Result<()> {
 }
 
 fn resolve_image(path: &Path) -> Result<PathBuf> {
-    let image = fs::canonicalize(path)
-        .with_context(|| format!("resolve wallpaper {}", path.display()))?;
+    let image =
+        fs::canonicalize(path).with_context(|| format!("resolve wallpaper {}", path.display()))?;
     ensure!(
         image.is_file(),
         "wallpaper is not a regular file: {}",
