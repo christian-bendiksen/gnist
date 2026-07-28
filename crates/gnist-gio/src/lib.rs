@@ -27,6 +27,18 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
         return;
     }
 
+    match symbols::detected_gtk() {
+        None => {
+            ox_log!("host has no GTK symbols; skipping");
+            return;
+        }
+        Some((major, None)) => {
+            ox_log!("unsupported GTK major version {major}; skipping");
+            return;
+        }
+        Some((_major, Some(_gtk))) => {}
+    }
+
     if !module.is_null() {
         unsafe extern "C" {
             fn g_type_module_use(module: *mut c_void) -> i32;
@@ -40,7 +52,9 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
         config::VERSION
     );
 
-    glib::idle_add_local_once(|| attach_or_retry(0));
+    // GIO may load modules from a worker thread while GTK's default context is
+    // owned by the UI thread. Queue attachment without acquiring that context.
+    glib::idle_add_once(|| attach_or_retry(0));
 }
 
 /// GIO module entry point that releases process-local state.
