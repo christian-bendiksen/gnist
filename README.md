@@ -63,8 +63,10 @@ Optional theme content includes:
 
 ## Add templates
 
-Templates live in `$GNIST_CONFIG/themes/templates/` and use `{{ name }}`
-placeholders.
+Templates use `{{ ... }}` placeholders. They can live in
+`$GNIST_CONFIG/themes/templates/`, or a selected theme can be self-contained by
+shipping its own `.tpl` files directly in `themes/data/<theme>/` — those are
+rendered too, ahead of the global templates.
 
 Create `$GNIST_CONFIG/themes/templates/kitty.conf.tpl`:
 
@@ -97,8 +99,97 @@ Unknown placeholders remain in the output so missing values are visible.
 Source precedence is:
 
 1. `themes/user-templates/`
-2. Files from the selected theme
+2. Templates and files from the selected theme (its `.tpl` files are rendered)
 3. `themes/templates/`
+
+A global `templates/` directory is optional: a theme may ship only static
+files or its own `.tpl` templates.
+
+### Template language
+
+Beyond plain values, templates accept expressions, filter pipelines, and
+conditional blocks.
+
+Every `colors.toml` scalar is available with its own type, plus a few generated
+values: `name`, `mode` (`light`/`dark`), `is_light`, `colors` (the 16 ANSI
+colors as a list), `wallpapers` (background image paths), and
+`border_active` / `border_inactive`.
+
+Expressions and math:
+
+```text
+{{ radius * 2 }}px
+{{ mode == "dark" }}
+{{ 'gnist' | upper }}      -> GNIST
+```
+
+Color helpers derive new colors from a single palette:
+
+| Template value | Result for `accent = "#89b4fa"` |
+|---|---|
+| `{{ accent }}` | `#89b4fa` |
+| `{{ accent \| lighten 0.1 }}` | `#95bcfb` |
+| `{{ accent \| darken 0.1 }}` | `#7ba2e1` |
+| `{{ accent \| mix background 0.5 }}` | `#546994` |
+| `{{ accent \| alpha 0.5 \| rgba }}` | `rgba(137,180,250,0.5)` |
+| `{{ accent \| rgb }}` | `137,180,250` |
+| `{{ accent \| invert }}` | `#764b05` |
+| `{{ accent \| contrast }}` | readable black or white |
+| `{{ accent \| complement }}` | hue-rotated 180° |
+| `{{ accent \| grayscale }}` | `#727272` |
+
+Color helpers: `hex`, `rgb`, `rgba`, `hsl`, `oklab`, `strip`, `lighten`,
+`darken`, `mix OTHER AMOUNT`, `alpha`, `saturate`, `adjust_hue DEGREES`,
+`invert`, `complement`, `grayscale`, `contrast`, `luminance`, `red`, `green`,
+`blue` (0-255 channels) and `red_n`, `green_n`, `blue_n` (0..1, for COSMIC).
+
+String and number helpers: `upper`, `lower`, `titlecase`, `trim`, `length`,
+`replace OLD NEW`, `default X`, `join SEP`, `int`, `round`, `floor`, `ceil`,
+`to_string`.
+
+Blocks branch and iterate:
+
+```text
+{{#if mode == "dark"}}theme=dark{{else}}theme=light{{/if}}
+{{#each colors as c}}, {{ c }}{{/each}}
+{{! a comment }}
+```
+
+Unknown expressions, names, and blocks are left visible in the output, so
+partial renders stay inspectable. `{{ missing | default "#fff" }}` fills in a
+fallback instead.
+
+Output filenames are templated too: `kitty.{{ name }}.conf.tpl` renders to
+`kitty.dusk.conf`.
+
+### Templated integrations
+
+Reload bindings in `bindings.kdl` and `bindings.d/` are expanded with the same
+values before use, so actions can reference theme values and generated paths.
+
+A theme may override integrations with optional files of its own:
+
+`gnome.toml`:
+
+```toml
+schema             = "org.gnome.desktop.interface"
+light_theme        = "adw-gtk3"
+dark_theme         = "adw-gtk3-dark"
+
+[[extra]]
+key                = "cursor-theme"
+value              = "{{ cursor_theme }}"
+```
+
+`wallpaper.toml`:
+
+```toml
+transition_type     = "fade"
+transition_duration = "0.6"
+```
+
+These files are rendered with the theme context and are not published under
+`current/`. Without them Gnist uses the built-in defaults.
 
 ## Connect applications
 

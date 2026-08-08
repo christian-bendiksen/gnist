@@ -1,7 +1,10 @@
 use crate::ctx::Ctx;
+use crate::render::engine::render_str;
+use crate::render::value::Value;
 use anyhow::{Context, Result};
 use kdl::KdlDocument;
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -14,10 +17,10 @@ enum ReloadAction {
     Touch { path: PathBuf },
 }
 
-pub fn run(ctx: &Ctx) {
+pub fn run(ctx: &Ctx, values: &HashMap<String, Value>) {
     let paths = binding_paths(&ctx.config_dir);
 
-    let Some((actions, warnings)) = parse_reload_files(&paths) else {
+    let Some((actions, warnings)) = parse_reload_files(&paths, values) else {
         eprintln!(
             "info: no reload bindings found in {}",
             ctx.config_dir.display()
@@ -58,7 +61,10 @@ fn binding_paths(config_dir: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn parse_reload_files(paths: &[PathBuf]) -> Option<(Vec<ReloadAction>, Vec<String>)> {
+fn parse_reload_files(
+    paths: &[PathBuf],
+    values: &HashMap<String, Value>,
+) -> Option<(Vec<ReloadAction>, Vec<String>)> {
     if paths.is_empty() {
         return None;
     }
@@ -66,7 +72,7 @@ fn parse_reload_files(paths: &[PathBuf]) -> Option<(Vec<ReloadAction>, Vec<Strin
     let mut actions = Vec::new();
     let mut warnings = Vec::new();
     for path in paths {
-        match parse_reload_actions(path) {
+        match parse_reload_actions(path, values) {
             Ok(parsed) => actions.extend(parsed),
             Err(error) => warnings.push(format!(
                 "warn: failed to load reload bindings from {}: {error:#}",
@@ -77,10 +83,15 @@ fn parse_reload_files(paths: &[PathBuf]) -> Option<(Vec<ReloadAction>, Vec<Strin
     Some((actions, warnings))
 }
 
-fn parse_reload_actions(kdl_path: &Path) -> Result<Vec<ReloadAction>> {
+fn parse_reload_actions(
+    kdl_path: &Path,
+    values: &HashMap<String, Value>,
+) -> Result<Vec<ReloadAction>> {
     let content =
         fs::read_to_string(kdl_path).with_context(|| format!("read {}", kdl_path.display()))?;
-    let doc: KdlDocument = content
+    // Bindings may reference theme values, e.g. generated paths.
+    let rendered = render_str(&content, values);
+    let doc: KdlDocument = rendered
         .parse()
         .with_context(|| format!("parse {}", kdl_path.display()))?;
 
@@ -176,7 +187,11 @@ fn expand_tilde(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ReloadAction, binding_paths, parse_reload_files};
-    use std::{fs, path::PathBuf};
+    use std::{collections::HashMap, fs, path::PathBuf};
+
+    fn empty_values() -> HashMap<String, crate::render::value::Value> {
+        HashMap::new()
+    }
 
     fn binding(path: &std::path::Path, target: &str) {
         fs::write(
@@ -198,7 +213,7 @@ mod tests {
         fs::create_dir(dropins.join("05-directory.kdl")).unwrap();
 
         let paths = binding_paths(dir.path());
-        let (actions, warnings) = parse_reload_files(&paths).unwrap();
+        let (actions, warnings) = parse_reload_files(&paths, &empty_values()).unwrap();
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -223,7 +238,7 @@ mod tests {
         fs::create_dir(&dropins).unwrap();
         binding(&dropins.join("theme.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path())).unwrap();
+        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -243,7 +258,7 @@ mod tests {
         fs::write(dropins.join("10-malformed.kdl"), "bind {").unwrap();
         binding(&dropins.join("20-valid.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path())).unwrap();
+        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert_eq!(
             actions,
@@ -264,7 +279,7 @@ mod tests {
         fs::write(dropins.join("10-unreadable.kdl"), [0xff]).unwrap();
         binding(&dropins.join("20-valid.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path())).unwrap();
+        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert_eq!(
             actions,
@@ -282,7 +297,7 @@ mod tests {
         let base = dir.path().join("bindings.kdl");
         fs::write(&base, "bind {").unwrap();
 
-        let (actions, warnings) = parse_reload_files(&[base]).unwrap();
+        let (actions, warnings) = parse_reload_files(&[base], &empty_values()).unwrap();
 
         assert!(actions.is_empty());
         assert_eq!(warnings.len(), 1);

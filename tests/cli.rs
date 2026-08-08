@@ -22,6 +22,46 @@ fn write_executable(path: &std::path::Path, contents: &str) {
 }
 
 #[test]
+fn rich_templates_expand_filters_blocks_and_filenames() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let themes = config.join("gnist/themes");
+    let theme = themes.join("data/dusk");
+    fs::create_dir_all(&theme).unwrap();
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(theme.join("colors.toml"), "accent = \"#89b4fa\"\n").unwrap();
+    fs::write(
+        themes.join("templates/kitty.{{ name }}.conf.tpl"),
+        "foreground {{ accent | lighten 0.1 }}\n\
+         {{#if mode == \"dark\"}}theme=dark{{else}}theme=light{{/if}}\n",
+    )
+    .unwrap();
+    fs::write(themes.join("templates/quiet.txt.tpl"), "{{ accent }}\n").unwrap();
+
+    let set = gnist()
+        .args(["set", "dusk", "--skip-apply"])
+        .env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", &config)
+        .env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_DATA_DIRS", "")
+        .output()
+        .unwrap();
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let rendered =
+        fs::read_to_string(themes.join("generated/live/kitty.dusk.conf")).unwrap();
+    assert_eq!(rendered, "foreground #95bcfb\ntheme=dark\n");
+    assert_eq!(
+        fs::read_to_string(themes.join("generated/live/quiet.txt")).unwrap(),
+        "#89b4fa\n"
+    );
+}
+
+#[test]
 fn current_fails_after_active_state_is_cleared() {
     let dir = tempfile::tempdir().unwrap();
     let output = gnist()

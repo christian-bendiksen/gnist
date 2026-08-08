@@ -133,7 +133,10 @@ fn main() -> Result<()> {
         }
         Cmd::Update { theme } => cmd_update(&ctx, theme.as_deref()),
         Cmd::Reload => {
-            apply::reload::run(&ctx);
+            let values = Theme::load_current(&ctx)
+                .map(|theme| theme.vars)
+                .unwrap_or_default();
+            apply::reload::run(&ctx, &values);
             Ok(())
         }
         Cmd::Gnome { skip_icons } => {
@@ -225,7 +228,7 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     }
 
     if !flags.skip_reload {
-        apply::reload::run(ctx);
+        apply::reload::run(ctx, &theme.vars);
     }
 
     if !flags.skip_wallpaper

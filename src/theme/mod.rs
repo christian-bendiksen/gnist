@@ -3,6 +3,7 @@ pub mod colors;
 mod vars;
 
 use crate::ctx::Ctx;
+use crate::render::value::Value;
 use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeSet, HashMap},
@@ -15,7 +16,7 @@ use vars::build_vars_from_colors;
 pub struct Theme {
     pub name: String,
     pub root: PathBuf,
-    pub vars: HashMap<String, String>,
+    pub vars: HashMap<String, Value>,
     pub is_light: bool,
     pub icon_theme: Option<String>,
     pub backgrounds_dir: Option<PathBuf>,
@@ -59,10 +60,12 @@ impl Theme {
             .with_context(|| format!("build vars for theme '{name}'"))?;
 
         let borders = border::resolve(&root);
-        let active = borders.active.or_else(|| vars.get("accent").cloned());
+        let active = borders
+            .active
+            .or_else(|| vars.get("accent").and_then(value_string));
         let inactive = borders
             .inactive
-            .or_else(|| vars.get("color8").cloned())
+            .or_else(|| vars.get("color8").and_then(value_string))
             .or_else(|| active.clone());
         if let Some(c) = &active {
             vars::insert_border(&mut vars, "active", c);
@@ -72,10 +75,16 @@ impl Theme {
         }
 
         let bg_dir = root.join("backgrounds");
+        let is_light = root.join("light.mode").is_file();
+        let wallpapers: Vec<String> = image_files(&bg_dir)
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        vars::inject_context(&mut vars, name, is_light, &wallpapers);
 
         Ok(Self {
             name: name.to_owned(),
-            is_light: root.join("light.mode").is_file(),
+            is_light,
             icon_theme: read_trimmed(&root.join("icons.theme"))?,
             backgrounds_dir: bg_dir.is_dir().then_some(bg_dir),
             root,
@@ -143,6 +152,32 @@ fn list_names_from_roots(source_roots: &[PathBuf]) -> Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
+fn image_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Extract a colour-capable string from a value, used for border fallbacks.
+fn value_string(v: &Value) -> Option<String> {
+    match v {
+        Value::Str(s) => Some(s.clone()),
+        Value::Int(i) => Some(i.to_string()),
+        Value::Float(f) => Some(f.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Color(c) => Some(c.to_hex()),
+        _ => None,
+    }
+}
+
 fn read_trimmed(path: &Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(s) => {
@@ -176,7 +211,7 @@ mod tests {
         let theme = Theme::load_from_roots(&[config.clone(), user_data], "shared").unwrap();
 
         assert_eq!(theme.root, config.join("data/shared"));
-        assert_eq!(theme.vars["accent"], "#111111");
+        assert_eq!(theme.vars["accent"].display(), "#111111");
     }
 
     #[test]

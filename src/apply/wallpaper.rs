@@ -1,13 +1,53 @@
 //! Selects and cycles wallpapers with `awww`.
+//!
+//! A theme may ship a templated `wallpaper.toml` to override the awww options:
+//!
+//! ```toml
+//! transition_type     = "fade"
+//! transition_duration = "0.6"
+//! ```
 use crate::{ctx::Ctx, theme::Theme, util};
+use crate::render::engine::render_str;
+use crate::render::value::Value;
 use anyhow::{Context, Result, bail, ensure};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
+
+struct WallpaperConfig {
+    transition_type: String,
+    transition_duration: String,
+}
+
+impl Default for WallpaperConfig {
+    fn default() -> Self {
+        Self {
+            transition_type: "fade".into(),
+            transition_duration: "0.6".into(),
+        }
+    }
+}
+
+impl WallpaperConfig {
+    fn load(root: &Path, values: &HashMap<String, Value>) -> Self {
+        let mut cfg = Self::default();
+        let Ok(src) = fs::read_to_string(root.join("wallpaper.toml")) else {
+            return cfg;
+        };
+        let Ok(toml) = render_str(&src, values).parse::<toml::Value>() else {
+            return cfg;
+        };
+        let get = |key: &str| toml.get(key).and_then(|v| v.as_str()).map(str::to_owned);
+        cfg.transition_type = get("transition_type").unwrap_or(cfg.transition_type);
+        cfg.transition_duration = get("transition_duration").unwrap_or(cfg.transition_duration);
+        cfg
+    }
+}
 
 fn canonical_str(path: &Path) -> Option<String> {
     std::fs::canonicalize(path)
@@ -17,6 +57,7 @@ fn canonical_str(path: &Path) -> Option<String> {
 
 /// Advance to the next wallpaper and ask `awww` to display it.
 pub fn run(ctx: &Ctx, theme: &Theme) -> Result<()> {
+    let cfg = WallpaperConfig::load(&theme.root, &theme.vars);
     let candidates = collect_candidates(ctx, theme);
 
     if candidates.is_empty() {
@@ -28,7 +69,7 @@ pub fn run(ctx: &Ctx, theme: &Theme) -> Result<()> {
     let current = canonical_str(&ctx.background_link);
 
     let next = pick_next(&candidates, current.as_deref());
-    change_wallpaper(next)?;
+    change_wallpaper(next, &cfg)?;
     util::symlink_force(next, &ctx.background_link)?;
     Ok(())
 }
@@ -36,7 +77,7 @@ pub fn run(ctx: &Ctx, theme: &Theme) -> Result<()> {
 /// Select an exact image independently of the active theme's wallpaper cycle.
 pub fn set(ctx: &Ctx, image: &Path) -> Result<()> {
     let image = resolve_image(image)?;
-    change_wallpaper(&image)?;
+    change_wallpaper(&image, &WallpaperConfig::default())?;
     util::symlink_force(&image, &ctx.background_link)?;
     Ok(())
 }
@@ -105,13 +146,14 @@ fn pick_next<'a>(candidates: &'a [Candidate], current: Option<&str>) -> &'a Path
     &candidates[idx].path
 }
 
-fn change_wallpaper(path: &Path) -> Result<()> {
+fn change_wallpaper(path: &Path, cfg: &WallpaperConfig) -> Result<()> {
     wait_for_awww()?;
 
     let status = Command::new("awww")
         .arg("img")
         .arg(path)
-        .args(["--transition-type=fade", "--transition-duration=0.6"])
+        .arg(format!("--transition-type={}", cfg.transition_type))
+        .arg(format!("--transition-duration={}", cfg.transition_duration))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
