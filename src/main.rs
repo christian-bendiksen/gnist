@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 mod apply;
 mod ctx;
 mod install;
+mod inspect;
 mod render;
 mod theme;
 mod transaction;
@@ -73,6 +74,9 @@ enum Cmd {
     /// Show installed themes
     List,
 
+    /// Inspect installed palettes without publishing or applying anything (JSON).
+    Inspect { theme: Option<String> },
+
     /// Print the active theme name
     Current,
 
@@ -123,6 +127,7 @@ fn main() -> Result<()> {
             wallpaper,
         } => cmd_reapply(&ctx, integrations.apply_flags(!wallpaper)),
         Cmd::List => cmd_list(&ctx),
+        Cmd::Inspect { theme } => inspect::run(&ctx, theme.as_deref()),
         Cmd::Current => cmd_current(&ctx),
         Cmd::Install { url } => {
             let name = install::run(&ctx, &url).context("install theme")?;

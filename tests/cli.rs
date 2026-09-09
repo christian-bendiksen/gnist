@@ -22,6 +22,33 @@ fn write_executable(path: &std::path::Path, contents: &str) {
 }
 
 #[test]
+fn inspection_is_read_only_and_uses_effective_theme_precedence() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let data = dir.path().join("data");
+    write_theme(&config, "dusk", "#123456");
+    write_theme(&data, "dusk", "#ffffff");
+    write_theme(&config, "light", "#abcdef");
+    fs::write(config.join("gnist/themes/data/light/light.mode"), "").unwrap();
+    fs::write(config.join("gnist/themes/current.theme"), "dusk\n").unwrap();
+    let run = |args: &[&str]| gnist().args(args).env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", &config).env("XDG_DATA_HOME", &data).env("XDG_DATA_DIRS", "").output().unwrap();
+    let output = run(&["inspect"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["themes"].as_array().unwrap().len(), 2);
+    assert_eq!(result["themes"][0]["colors"]["accent"], "#123456");
+    assert_eq!(result["themes"][1]["light"], true);
+    assert!(!config.join("gnist/themes/generated").exists());
+    assert_eq!(fs::read_to_string(config.join("gnist/themes/current.theme")).unwrap(), "dusk\n");
+    assert!(!run(&["inspect", "../../other"]).status.success());
+    fs::write(config.join("gnist/themes/data/light/colors.toml"), "invalid TOML").unwrap();
+    let result: serde_json::Value = serde_json::from_slice(&run(&["inspect"]).stdout).unwrap();
+    assert!(result["themes"][1]["error"].is_string());
+    assert_eq!(result["themes"][0]["id"], "dusk");
+}
+
+#[test]
 fn rich_templates_expand_filters_blocks_and_filenames() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config");

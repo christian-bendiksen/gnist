@@ -25,6 +25,23 @@ examples below use this variable:
 GNIST_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/gnist"
 ```
 
+## Inspect a theme
+
+Desktop clients can inspect installed palettes without applying them:
+
+```sh
+gnist inspect
+gnist inspect dusk
+```
+
+Both commands emit one JSON document with `schema_version: 1`, `current` and
+`themes`. Each theme includes its `id`, `light` mode, effective semantic `colors`,
+`icon_theme` and `wallpapers`. The same source precedence and derived values used
+for rendering are used for previews. A malformed installed theme carries an
+`error` without hiding other themes. Inspection does not render templates,
+create publication directories, switch wallpaper or change the active theme.
+Use `gnist set NAME` to publish and apply a chosen theme.
+
 ## Create a theme
 
 Create a theme directory:
