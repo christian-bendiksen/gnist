@@ -483,6 +483,9 @@ pub fn report(app: &str, body: &str, badge: &str, columns: usize, theme: Theme) 
 mod tests {
     use super::*;
 
+    /// Serialises the tests that read and write process-wide environment.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn documents_fit_and_retain_long_paths_and_untrusted_text() {
         for width in [24, 40, 60, 80, 120] {
@@ -607,6 +610,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
