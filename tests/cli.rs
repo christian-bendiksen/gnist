@@ -295,3 +295,50 @@ fn fallback_render_failure_preserves_source_and_active_state() {
         "current background"
     );
 }
+
+/// The outputs a script reads stay exactly what they were.
+///
+/// Gnist renders through the shared Herda terminal design now, and the
+/// temptation with a design crate is to put a heading above everything. But
+/// `gnist current` prints a theme name that a keybinding or a status bar
+/// substitutes straight into a command, `gnist list` prints one name per line,
+/// and `gnist inspect` prints a JSON document. Decorating those because the
+/// output happens to be a terminal would break every caller.
+#[test]
+fn scriptable_output_is_never_decorated() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let data = dir.path().join("data");
+    write_theme(&config, "dusk", "#123456");
+    write_theme(&config, "noon", "#abcdef");
+    fs::write(config.join("gnist/themes/current.theme"), "dusk\n").unwrap();
+    let run = |args: &[&str]| {
+        gnist()
+            .args(args)
+            .env("HOME", dir.path())
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_DATA_DIRS", "")
+            .output()
+            .unwrap()
+    };
+
+    let current = run(&["current"]);
+    assert_eq!(current.stdout, b"dusk\n");
+    assert!(current.stderr.is_empty());
+
+    let list = run(&["list"]);
+    assert_eq!(list.stdout, b"dusk (current)\nnoon\n");
+    assert!(list.stderr.is_empty());
+
+    let inspect = run(&["inspect"]);
+    assert!(!inspect.stdout.contains(&b'\x1b'));
+    serde_json::from_slice::<serde_json::Value>(&inspect.stdout).unwrap();
+
+    // The reports do carry the design — and still no escapes off a terminal.
+    let init = run(&["init"]);
+    let text = String::from_utf8(init.stdout).unwrap();
+    assert!(text.contains("gnist  Prepare the theme directories"), "{text}");
+    assert!(text.contains("DIRECTORY"), "{text}");
+    assert!(!text.contains('\x1b'), "{text}");
+}

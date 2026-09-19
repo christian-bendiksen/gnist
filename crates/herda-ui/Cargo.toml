@@ -1,0 +1,15 @@
+[package]
+name = "herda-ui"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crossterm = { version = "0.29", default-features = false, features = ["events", "bracketed-paste"] }
+signal-hook = "0.3"
+unicode-width = "0.2"

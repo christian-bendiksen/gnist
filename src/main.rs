@@ -1,11 +1,14 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use herda_ui::document::Row;
+use herda_ui::ink::Ink;
 use std::path::{Path, PathBuf};
 
 mod apply;
 mod ctx;
-mod install;
 mod inspect;
+mod install;
+mod output;
 mod render;
 mod theme;
 mod transaction;
@@ -113,6 +116,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    output::init(command_title(&cli.cmd));
     let ctx = Ctx::new().context("initialise context")?;
 
     match cli.cmd {
@@ -159,6 +163,24 @@ fn main() -> Result<()> {
     }
 }
 
+/// What this command is doing, for the heading.
+const fn command_title(command: &Cmd) -> &'static str {
+    match command {
+        Cmd::Init => "Prepare the theme directories",
+        Cmd::Set { .. } => "Switch theme",
+        Cmd::Reapply { .. } => "Reapply the active theme",
+        Cmd::List => "Installed themes",
+        Cmd::Inspect { .. } => "Theme palettes",
+        Cmd::Current => "The active theme",
+        Cmd::Install { .. } => "Install a theme",
+        Cmd::Remove { .. } => "Remove a theme",
+        Cmd::Update { .. } => "Update installed themes",
+        Cmd::Reload => "Reload applications",
+        Cmd::Gnome { .. } => "Apply GNOME appearance",
+        Cmd::Wallpaper { .. } => "Wallpaper",
+    }
+}
+
 fn cmd_init(ctx: &Ctx) -> Result<()> {
     let dirs = [
         ("data", &ctx.data_dir),
@@ -167,12 +189,38 @@ fn cmd_init(ctx: &Ctx) -> Result<()> {
         ("generated/live", &ctx.live_dir),
     ];
 
+    let mut rows = Vec::with_capacity(dirs.len());
     for (label, path) in &dirs {
         let existed = path.is_dir();
         std::fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
-        let status = if existed { "exists " } else { "created" };
-        println!("  {status}  {label:<16} {}", path.display());
+        let (marker, ink) = output::marker(if existed {
+            output::Kind::Changed
+        } else {
+            output::Kind::Added
+        });
+        rows.push(
+            Row::new(vec![
+                ((*label).to_owned(), Ink::Text),
+                (path.display().to_string(), Ink::Muted),
+                (
+                    if existed { "exists" } else { "created" }.to_owned(),
+                    if existed { Ink::Muted } else { Ink::Green },
+                ),
+            ])
+            .marked(marker, ink),
+        );
     }
+
+    let mut doc = output::document("Prepare the theme directories", "INIT");
+    doc.table(
+        &[
+            output::column("directory"),
+            output::column("path"),
+            output::column("state"),
+        ],
+        &rows,
+    );
+    print!("{}", doc.render());
 
     Ok(())
 }
@@ -225,7 +273,7 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     apply::gtk_css::refresh_user_css_links(ctx);
 
     if let Err(e) = apply::gtk_css::emit_current(ctx, Some(theme)) {
-        eprintln!("warn: gtk-css reload failed: {e:#}");
+        eprintln!("{}", output::warn(&format!("gtk-css reload failed: {e:#}")));
     }
 
     if !flags.skip_gnome {
@@ -239,7 +287,10 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     if !flags.skip_wallpaper
         && let Err(e) = apply::wallpaper::run(ctx, theme)
     {
-        eprintln!("warn: wallpaper apply failed: {e:#}");
+        eprintln!(
+            "{}",
+            output::warn(&format!("wallpaper apply failed: {e:#}"))
+        );
     }
 
     Ok(())
@@ -302,17 +353,12 @@ fn cmd_remove(
         None
     };
 
-    if !yes {
-        eprint!("Remove '{name}'  ({})? [y/N] ", path.display());
-        std::io::Write::flush(&mut std::io::stderr()).ok();
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .context("read confirmation")?;
-        if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
-            eprintln!("Cancelled");
-            return Ok(());
-        }
+    if !yes
+        && !output::confirm(&format!("Remove '{name}'  ({})?", path.display()))
+            .context("read confirmation")?
+    {
+        eprintln!("Cancelled");
+        return Ok(());
     }
 
     if removing_current {
@@ -361,15 +407,19 @@ fn cmd_update(ctx: &Ctx, theme: Option<&str>) -> Result<()> {
     for name in &targets {
         let path = ctx.data_dir.join(name);
         if !path.join(".git").is_dir() {
-            eprintln!("skip  {name} (no .git - not installed via gnist)");
+            eprintln!(
+                "{}",
+                output::pending(&format!("{name} — no .git, not installed via gnist"))
+            );
             continue;
         }
-        print!("pull  {name} ... ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        // On a terminal the line is replaced by its outcome, so the finished
+        // list reads as results rather than as a transcript of what was tried.
+        output::working(name);
         match install::git_pull(&path) {
-            Ok(()) => println!("ok"),
+            Ok(()) => output::settled(&output::ok(name)),
             Err(e) => {
-                println!("failed");
+                output::settled(&output::fail(name));
                 eprintln!("  {e:#}");
                 failed.push(name.clone());
             }
