@@ -243,7 +243,9 @@ impl Document {
     /// but the alignment.
     pub fn table(&mut self, columns: &[Column], rows: &[Row]) {
         if self.layout.tabular() {
-            self.lines.push(String::new());
+            if self.lines.last().is_some_and(|line| !line.is_empty()) {
+                self.lines.push(String::new());
+            }
             self.lines
                 .extend(table(columns, rows, self.layout, self.theme));
         } else {
@@ -369,16 +371,20 @@ pub fn table(columns: &[Column], rows: &[Row], layout: Layout, theme: Theme) -> 
     lines
 }
 
-/// Fit the natural column widths to the row.
+/// Shrink the natural column widths until the row holds them.
 ///
-/// Slack goes to the first column, which holds the name a reader scans down.
-/// Overflow is taken from the *widest* column, one cell at a time — not from
-/// the first, which is how a short `DIRECTORY` column came to be clipped to
-/// `user-templa…` beside a `PATH` column with room to spare.
+/// A table is as wide as its content and no wider: slack is left as empty
+/// space to the right, which is how the design draws it and what keeps a
+/// right-aligned column of figures next to the words it belongs to rather than
+/// flung against the far edge of a wide terminal.
+///
+/// Overflow comes off the *widest* column, one cell at a time — not off the
+/// first, which is how a short `DIRECTORY` column came to be clipped to
+/// `user-templa…` beside a `PATH` column with room to spare. Ties go to the
+/// later column: the first holds the name a reader scans down.
 fn fit(widths: &mut [usize], row: usize, overhead: usize) {
     let natural: usize = widths.iter().sum::<usize>() + overhead;
-    if natural < row {
-        widths[0] += row - natural;
+    if natural <= row {
         return;
     }
     let mut over = natural - row;
@@ -387,8 +393,6 @@ fn fit(widths: &mut [usize], row: usize, overhead: usize) {
             .iter()
             .copied()
             .enumerate()
-            // Ties go to the later column: the first holds the name, and a
-            // reader scanning a list needs that one intact longest.
             .max_by_key(|(index, width)| (*width, *index))
             .expect("a table has at least one column");
         // Nothing left to give: the terminal is narrower than the columns can
@@ -557,10 +561,20 @@ mod tests {
             "the short column is intact: {out}"
         );
         assert!(out.contains('…'), "the long column gave the ground: {out}");
-        // With room to spare, the first column takes the slack instead.
-        let mut wide = Document::new("gnist", "Prepare", "INIT", 110, Theme::PLAIN);
+        // With room to spare the table is its own width, not the row's: a
+        // column of figures stays beside the words it belongs to.
+        let mut wide = Document::new("gnist", "Prepare", "INIT", 140, Theme::PLAIN);
         wide.table(&columns, &rows);
-        assert!(!wide.render().contains('…'));
+        let wide = wide.render();
+        assert!(!wide.contains('…'), "{wide}");
+        let row = wide
+            .lines()
+            .find(|line| line.contains("user-templates"))
+            .expect("the row is there");
+        assert!(
+            row.trim_end().len() < 100,
+            "a wide terminal should not stretch the table: {row:?}"
+        );
     }
 
     /// The seam sits under the heading; section breaks stay flat.

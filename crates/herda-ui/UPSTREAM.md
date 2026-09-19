@@ -1,7 +1,7 @@
 # Herda terminal components
 
 This is a source snapshot of `crates/herda-ui` from Herda commit
-`57e0599b314d7c41497cdeeac998b2b05b6217a5`.
+`da5581a4c4d5fa9d2d9cf8dafcf15dc77b9fb677`.
 
 The implementation belongs to Herda. Keep its Cargo.toml and src/ byte-for-byte
 identical when updating this snapshot. Make renderer changes upstream, then
@@ -28,7 +28,7 @@ upstream and refresh instead.
 | --- | --- | --- |
 | Cargo.toml | 334 | 15 |
 | src/browser.rs | 18222 | 510 |
-| src/document.rs | 20189 | 579 |
+| src/document.rs | 20779 | 593 |
 | src/ink.rs | 11088 | 295 |
 | src/lib.rs | 1881 | 37 |
 | src/presentation.rs | 8993 | 256 |
