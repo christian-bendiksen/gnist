@@ -5,7 +5,8 @@
 //! headings, rules, cells, and the bounded [`Document`] that a command's
 //! scrollback output is built into.
 use std::io::IsTerminal;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub use crate::document::Document;
 pub use crate::ink::{Ink, glyph};
@@ -13,9 +14,8 @@ pub use crate::width::Layout;
 
 /// What this terminal can render, decided once and then carried.
 ///
-/// Every renderer in the crate is a pure function of its inputs plus a `Theme`,
-/// and returns byte-for-byte plain text when `color` is off — so a harness, a
-/// pipe and a serial console all get exactly the text they always got.
+/// Human renderers sanitize their input in every theme. Color only controls
+/// the trusted styling added afterwards; machine bytes bypass these renderers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Theme {
     pub color: bool,
@@ -23,7 +23,7 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Never styled: machine output, tests, and anything being piped.
+    /// Sanitized human text without styling. Machine bytes bypass rendering.
     pub const PLAIN: Self = Self {
         color: false,
         truecolor: false,
@@ -82,11 +82,12 @@ impl Theme {
         }
     }
 
-    /// Wrap `text` in the escapes for `ink`, or return it untouched.
+    /// Sanitize human text, then apply only the requested trusted style.
     #[must_use]
     pub fn paint(self, text: &str, ink: Ink, bold: bool) -> String {
-        if !self.color {
-            return text.to_owned();
+        let text = clean(&plain(text));
+        if !self.color || text.is_empty() {
+            return text;
         }
         let code = ink.code(self.truecolor);
         format!("\x1b[{};{code}m{text}\x1b[0m", if bold { 1 } else { 22 })
@@ -105,7 +106,7 @@ impl Theme {
     /// serial console and a log file are always in.
     #[must_use]
     pub fn mark(self, glyph: &str, ink: Ink, text: &str) -> String {
-        format!("{} {text}", self.paint(glyph, ink, true))
+        format!("{} {}", self.paint(glyph, ink, true), clean(&plain(text)))
     }
 
     /// A finished thing: `✓ text`.
@@ -152,20 +153,26 @@ impl Theme {
     /// the kernel and got the real answer.
     #[must_use]
     pub fn hairline(self, label: &str, tail: &str, width: usize) -> String {
-        let lead = 3 + label.width(); // "── " + label + the joining space
-        // The space before the tail exists only when there is a tail, so an
-        // empty one leaves the rule running to the last column rather than one
-        // short of it.
-        let tail_width = plain(tail).width();
+        if width == 0 {
+            return String::new();
+        }
+        let label = clean(&plain(label));
+        let tail = clean(&plain(tail));
+        // Drop decoration first, then the tail; preserve a clipped phase label.
+        let reserved = 7usize.saturating_add(label.width());
+        if width < reserved {
+            return self.paint(&clip(&label, width), Ink::Gold, true);
+        }
+        let tail = clip(&tail, width.saturating_sub(reserved + 1));
         let gap = usize::from(!tail.is_empty());
-        let rule_width = width.saturating_sub(lead + tail_width + gap + 1).max(2);
-        let rule: String = std::iter::repeat_n(glyph::RULE, rule_width).collect();
+        let rule_width = width - 4 - label.width() - tail.width() - gap;
         format!(
-            "{} {} {}{}{tail}",
+            "{} {} {}{}{}",
             self.paint("──", Ink::Rule, false),
-            self.paint(label, Ink::Gold, true),
-            self.paint(&rule, Ink::Rule, false),
+            self.paint(&label, Ink::Gold, true),
+            self.rule(rule_width),
             " ".repeat(gap),
+            self.paint(&tail, Ink::Text, false),
         )
     }
 
@@ -178,7 +185,8 @@ impl Theme {
         let filled = if total == 0 {
             width
         } else {
-            (done.min(total) * width).div_ceil(total)
+            // Widen before multiplication: saturation would underfill large counts.
+            ((done.min(total) as u128 * width as u128).div_ceil(total as u128)) as usize
         };
         let ink = if total > 0 && done >= total {
             Ink::Green
@@ -227,6 +235,10 @@ impl Theme {
     }
 
     pub fn heading_for(self, app: &str, title: &str, tail: &str, width: usize) -> String {
+        let app = clean(&plain(app));
+        let title = clean(&plain(title));
+        let tail = clean(&plain(tail));
+        let (app, title, tail) = (app.as_str(), title.as_str(), tail.as_str());
         let prefix = app.width() + 2;
         if width <= prefix {
             return self.paint(&clip(app, width), Ink::Gold, true);
@@ -305,7 +317,7 @@ pub fn size_label(bytes: u64) -> String {
 pub fn clean(text: &str) -> String {
     text.chars()
         .map(|c| {
-            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+            if c.is_control() || matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
                 ' '
             } else {
                 c
@@ -315,22 +327,22 @@ pub fn clean(text: &str) -> String {
 }
 
 pub fn clip(text: &str, width: usize) -> String {
-    let text = clean(text);
-    if text.width() <= width {
-        return text;
-    }
     if width == 0 {
         return String::new();
     }
+    let text = clean(&plain(text));
+    if text.width() <= width {
+        return text;
+    }
     let mut result = String::new();
     let mut used = 0;
-    for c in text.chars() {
-        let n = c.width().unwrap_or(0);
+    for c in text.graphemes(true) {
+        let n = c.width();
         if used + n > width - 1 {
             break;
         }
         used += n;
-        result.push(c);
+        result.push_str(c);
     }
     result.push('…');
     result
@@ -347,7 +359,7 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     let mut lines = Vec::new();
     let mut line = String::new();
-    for word in clean(text).split_whitespace() {
+    for word in clean(&plain(text)).split_whitespace() {
         if !line.is_empty() && line.width() + 1 + word.width() > width {
             lines.push(line);
             line = String::new();
@@ -370,15 +382,15 @@ pub fn fold(text: &str, width: usize) -> Vec<String> {
     }
     let mut result = Vec::new();
     let mut line = String::new();
-    for word in clean(text).split_whitespace() {
+    for word in clean(&plain(text)).split_whitespace() {
         if !line.is_empty() && line.width() + word.width() + 1 > width {
             result.push(std::mem::take(&mut line));
         }
         if !line.is_empty() {
             line.push(' ');
         }
-        for ch in word.chars() {
-            let n = ch.width().unwrap_or(0);
+        for ch in word.graphemes(true) {
+            let n = ch.width();
             if line.width() + n > width {
                 if !line.is_empty() {
                     result.push(std::mem::take(&mut line));
@@ -389,7 +401,7 @@ pub fn fold(text: &str, width: usize) -> Vec<String> {
                     continue;
                 }
             }
-            line.push(ch);
+            line.push_str(ch);
         }
     }
     if !line.is_empty() {
@@ -482,6 +494,72 @@ pub fn report(app: &str, body: &str, badge: &str, columns: usize, theme: Theme) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_human_renderers_reject_terminal_controls_in_every_theme() {
+        let hostile = "name\x1b[2J\x1b]52;c;payload\x07\r\t\n\u{202e}\u{061c}\u{200f}end";
+        for theme in [Theme::PLAIN, Theme::FULL, Theme::INDEXED] {
+            for rendered in [
+                theme.paint(hostile, Ink::Text, true),
+                theme.mark(hostile, Ink::Gold, hostile),
+                theme.title_for(hostile, hostile),
+                theme.heading_for(hostile, hostile, hostile, 80),
+                theme.hairline(hostile, hostile, 80),
+                theme.cell(hostile, 20, Ink::Text, false),
+            ] {
+                assert!(!rendered.contains("\x1b[2J"));
+                assert!(!rendered.contains("\x1b]"));
+                assert!(!rendered.contains(['\r', '\n', '\t', '\u{202e}', '\u{061c}', '\u{200f}']));
+                assert_eq!(plain(&rendered), clean(&plain(&rendered)));
+                if !theme.color {
+                    assert!(!rendered.contains('\x1b'));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_renderers_fit_zero_through_one_hundred_columns() {
+        for width in 0..=100 {
+            for theme in [Theme::PLAIN, Theme::FULL, Theme::INDEXED] {
+                for text in [
+                    "",
+                    "\u{301}",
+                    "界面👩‍💻e\u{301}",
+                    "\x1b[31mvery long phase name\x1b[0m",
+                ] {
+                    for line in [
+                        theme.heading_for(text, text, text, width),
+                        theme.hairline(text, text, width),
+                        theme.cell(text, width, Ink::Text, false),
+                    ] {
+                        assert!(plain(&line).width() <= width, "{width}: {line:?}");
+                        if width == 0 {
+                            assert!(line.is_empty());
+                        }
+                    }
+                    assert!(clip(text, width).width() <= width);
+                }
+                let full = plain(&theme.bar(usize::MAX, usize::MAX, width));
+                assert_eq!(full, glyph::BAR_FULL.to_string().repeat(width));
+                let half = plain(&theme.bar(usize::MAX / 2 + 1, usize::MAX, width));
+                assert_eq!(half.width(), width);
+                assert_eq!(
+                    half.matches(glyph::BAR_FULL).count(),
+                    (width + 1).div_ceil(2).min(width)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clipping_and_folding_preserve_grapheme_clusters() {
+        assert_eq!(clip("👩‍💻abc", 3), "👩‍💻…");
+        assert_eq!(clip("e\u{301}abc", 2), "e\u{301}…");
+        assert_eq!(fold("👩‍💻👩‍💻", 2), ["👩‍💻", "👩‍💻"]);
+        assert_eq!(fold("界", 1), ["�"]);
+        assert_eq!(clip("\u{301}", 0), "");
+    }
 
     /// Serialises the tests that read and write process-wide environment.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());

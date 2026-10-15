@@ -192,6 +192,9 @@ impl Document {
     }
 
     pub fn render(self) -> String {
+        if self.layout.columns() <= crate::width::GUTTER {
+            return String::new();
+        }
         self.lines
             .into_iter()
             .map(|line| {
@@ -217,6 +220,10 @@ impl Document {
     /// as a warning at all. The rail is a shape rather than a colour, and it
     /// survives `NO_COLOR`.
     pub fn rail(&mut self, text: &str) {
+        if self.width < 4 {
+            self.text(text, Ink::Gold);
+            return;
+        }
         if self.lines.last().is_some_and(|line| !line.is_empty()) {
             self.lines.push(String::new());
         }
@@ -298,6 +305,19 @@ fn kept(columns: &[Column], layout: Layout) -> Vec<usize> {
 /// columns and drifted from the table beside it.
 #[must_use]
 pub fn table(columns: &[Column], rows: &[Row], layout: Layout, theme: Theme) -> Vec<String> {
+    if layout.columns() <= crate::width::GUTTER {
+        return Vec::new();
+    }
+    if !layout.tabular() {
+        let mut document = Document {
+            theme,
+            width: layout.content(),
+            layout,
+            lines: Vec::new(),
+        };
+        document.stack(columns, rows, &kept(columns, layout));
+        return document.lines;
+    }
     let kept = kept(columns, layout);
     if kept.is_empty() || rows.is_empty() {
         return Vec::new();
@@ -516,7 +536,7 @@ mod tests {
     /// No rendered line ever runs past the terminal, at any width.
     #[test]
     fn nothing_overruns_the_terminal() {
-        for width in 20..=140 {
+        for width in 0..=140 {
             for line in render(width).lines() {
                 assert!(
                     plain(line).width() <= width,

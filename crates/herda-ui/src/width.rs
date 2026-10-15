@@ -44,6 +44,15 @@ pub const BROWSER: usize = 44;
 /// The browser needs this many rows for a header, a page of rows and a footer.
 pub const BROWSER_ROWS: usize = 24;
 
+/// Below this — or with fewer rows than [`FRAME_ROWS`] — the full-screen frame
+/// is not drawn and a command shows the staged region instead. It is the
+/// width at which five steps of a change still have their names under them.
+pub const FRAME: usize = 60;
+
+/// The frame needs this many rows for its heading, the revision line, a
+/// statement, a short table and its footer.
+pub const FRAME_ROWS: usize = 20;
+
 /// Below this the staged progress region collapses to a single line.
 pub const STAGED: usize = 28;
 
@@ -171,7 +180,7 @@ impl Layout {
     #[must_use]
     pub fn bar_cells(self, beside: &str) -> usize {
         self.content()
-            .saturating_sub(beside.width() + 2)
+            .saturating_sub(crate::terminal::clean(&crate::terminal::plain(beside)).width() + 2)
             .clamp(1, 24)
     }
 }

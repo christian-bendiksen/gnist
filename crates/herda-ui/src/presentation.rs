@@ -148,9 +148,18 @@ pub fn phase(label: &str, tail: &str) -> String {
 /// retain their bytes; only a human terminal receives the shared document style.
 pub fn line(args: std::fmt::Arguments<'_>) {
     let text = args.to_string();
+    // A real terminal must never receive control characters from external text,
+    // even under `--plain` — plain is a styling choice, not a licence for a
+    // package description or path to rewrite the screen. A pipe or file keeps
+    // its exact bytes.
+    let terminal_output = std::io::stdout().is_terminal();
     let mut stdout = std::io::stdout().lock();
     if !interactive() {
-        let _ = writeln!(stdout, "{text}");
+        if terminal_output {
+            let _ = writeln!(stdout, "{}", crate::terminal::clean(&text));
+        } else {
+            let _ = writeln!(stdout, "{text}");
+        }
         return;
     }
     let theme = theme();

@@ -12,7 +12,8 @@
 //! dump and a paragraph of prose.
 
 use std::io::{IsTerminal, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crossterm::{
     cursor,
@@ -34,19 +35,111 @@ use crate::terminal::{Theme, clip, size, wrap};
 use crate::width::{BROWSER, BROWSER_ROWS, Layout};
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
+static OWNED: AtomicBool = AtomicBool::new(false);
 static HOOK: std::sync::Once = std::sync::Once::new();
+static SIGNALS: OnceLock<std::io::Result<ScreenSignals>> = OnceLock::new();
 
-/// Put the terminal back the way it was found.
-///
-/// Idempotent and safe from a panic hook or a signal handler, because leaving a
-/// terminal in raw mode with the cursor hidden makes the person's shell appear
-/// broken long after the command has gone.
+struct ScreenSignals {
+    default_action: Arc<AtomicBool>,
+    interrupted: Arc<AtomicUsize>,
+}
+
+impl ScreenSignals {
+    fn install() -> std::io::Result<Self> {
+        let signals = Self {
+            default_action: Arc::new(AtomicBool::new(true)),
+            interrupted: Arc::new(AtomicUsize::new(0)),
+        };
+        for signal in [
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGHUP,
+            signal_hook::consts::SIGINT,
+        ] {
+            // Registrations live for the process lifetime. Unregistering a
+            // signal-hook action does not restore the previous disposition.
+            // Install the default action first; even partial setup failure
+            // leaves every registered signal with normal termination behavior.
+            signal_hook::flag::register_conditional_default(
+                signal,
+                signals.default_action.clone(),
+            )?;
+            signal_hook::flag::register_usize(
+                signal,
+                signals.interrupted.clone(),
+                signal as usize,
+            )?;
+        }
+        Ok(signals)
+    }
+}
+
+struct ScreenOwnership;
+
+impl ScreenOwnership {
+    fn acquire() -> std::io::Result<Self> {
+        OWNED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "a browser already owns the terminal",
+                )
+            })?;
+        Ok(Self)
+    }
+}
+
+impl Drop for ScreenOwnership {
+    fn drop(&mut self) {
+        OWNED.store(false, Ordering::SeqCst);
+    }
+}
+
+/// A descriptor of the terminal, while a screen is written there in place of
+/// standard output. See [`Screen::write_to`].
+static TERMINAL: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Where a screen is written: standard output, unless the caller that turned
+/// standard output elsewhere left a descriptor of the terminal.
+pub(crate) struct Terminal;
+
+impl Terminal {
+    fn with<R>(write: impl FnOnce(&mut dyn Write) -> R) -> R {
+        // Reached from the panic hook, so a lock another thread died holding,
+        // or holds now, sends the bytes to standard output.
+        let held = match TERMINAL.try_lock() {
+            Ok(held) => Some(held),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
+        match held {
+            Some(mut held) => match held.as_mut() {
+                Some(terminal) => write(terminal),
+                None => write(&mut std::io::stdout()),
+            },
+            None => write(&mut std::io::stdout()),
+        }
+    }
+}
+
+impl Write for Terminal {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        Self::with(|out| out.write(bytes))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Self::with(|out| out.flush())
+    }
+}
+
+/// Restore terminal state from normal code or the panic hook.
+/// This performs I/O and must never run in an asynchronous signal handler.
 fn restore_terminal() {
     if ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = terminal::disable_raw_mode();
-        let _ = write!(std::io::stdout(), "\x1b[?2026l\x1b[0m");
+        let _ = write!(Terminal, "\x1b[?2026l\x1b[0m");
         let _ = execute!(
-            std::io::stdout(),
+            Terminal,
             event::DisableBracketedPaste,
             cursor::Show,
             LeaveAlternateScreen
@@ -54,60 +147,92 @@ fn restore_terminal() {
     }
 }
 
-/// The alternate screen, held for as long as this value lives.
+/// Exclusive alternate-screen ownership. TERM/HUP/INT request cleanup while
+/// held; their default actions apply again after cleanup, including suspension.
+/// Signal registrations persist for the process lifetime with conditional default
+/// actions; dropping a screen never relies on unregistering a handler. A pending
+/// termination signal is re-applied after restoring the terminal.
 pub struct Screen {
-    interrupted: std::sync::Arc<AtomicBool>,
-    signals: Vec<signal_hook::SigId>,
+    signals: &'static ScreenSignals,
+    _ownership: ScreenOwnership,
 }
 
 impl Screen {
-    /// Take the screen, installing the panic hook and signal flags that give it
-    /// back.
     pub fn enter() -> std::io::Result<Self> {
+        Self::enter_with(|| {
+            // The guard and handlers already exist if any setup step fails.
+            ACTIVE.store(true, Ordering::SeqCst);
+            terminal::enable_raw_mode()?;
+            execute!(
+                std::io::stdout(),
+                EnterAlternateScreen,
+                cursor::Hide,
+                event::EnableBracketedPaste
+            )
+        })
+    }
+
+    fn enter_with(setup: impl FnOnce() -> std::io::Result<()>) -> std::io::Result<Self> {
+        let ownership = ScreenOwnership::acquire()?;
+        let signals = SIGNALS
+            .get_or_init(ScreenSignals::install)
+            .as_ref()
+            .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))?;
         HOOK.call_once(|| {
             let previous = std::panic::take_hook();
             std::panic::set_hook(Box::new(move |info| {
                 restore_terminal();
+                if let Some(Ok(signals)) = SIGNALS.get() {
+                    signals.default_action.store(true, Ordering::SeqCst);
+                }
                 previous(info);
             }));
         });
-        terminal::enable_raw_mode()?;
-        ACTIVE.store(true, Ordering::SeqCst);
-        let mut screen = Self {
-            interrupted: std::sync::Arc::new(AtomicBool::new(false)),
-            signals: Vec::new(),
+        signals.interrupted.store(0, Ordering::SeqCst);
+        signals.default_action.store(false, Ordering::SeqCst);
+        let screen = Self {
+            signals,
+            _ownership: ownership,
         };
-        for signal in [
-            signal_hook::consts::SIGTERM,
-            signal_hook::consts::SIGHUP,
-            signal_hook::consts::SIGINT,
-        ] {
-            screen.signals.push(signal_hook::flag::register(
-                signal,
-                screen.interrupted.clone(),
-            )?);
+        setup()?;
+        if screen.interrupted() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "interrupted",
+            ));
         }
-        execute!(
-            std::io::stdout(),
-            EnterAlternateScreen,
-            cursor::Hide,
-            event::EnableBracketedPaste
-        )?;
         Ok(screen)
     }
 
-    /// Whether a signal asked this process to stop.
     #[must_use]
     pub fn interrupted(&self) -> bool {
-        self.interrupted.load(Ordering::Relaxed)
+        self.signals.interrupted.load(Ordering::SeqCst) != 0
+    }
+
+    /// Write the screen, and the restoring of the terminal, to `terminal` in
+    /// place of standard output, or to standard output again with `None`.
+    ///
+    /// For a caller that turns the process's standard output elsewhere while
+    /// the screen is up, so that nothing else in the process, and no child of
+    /// it, writes over the screen: it keeps a descriptor of the terminal here
+    /// first. The descriptor is closed when the screen is dropped.
+    pub fn write_to(&self, terminal: Option<std::fs::File>) {
+        *TERMINAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = terminal;
     }
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
         restore_terminal();
-        for signal in &self.signals {
-            signal_hook::low_level::unregister(*signal);
+        self.write_to(None);
+        self.signals.default_action.store(true, Ordering::SeqCst);
+        // Do not lose a signal that arrived during terminal cleanup or just
+        // before suspension. Reapply its default action only after restoration.
+        let signal = self.signals.interrupted.swap(0, Ordering::SeqCst);
+        if signal != 0 {
+            let _ = signal_hook::low_level::emulate_default_handler(signal as i32);
         }
     }
 }
@@ -303,6 +428,9 @@ pub fn note(text: &str, width: usize) -> Vec<Line> {
 
 fn paint(source: &dyn Source, theme: Theme) -> std::io::Result<()> {
     let (columns, rows) = size();
+    if columns == 0 || rows == 0 {
+        return Ok(());
+    }
     let lines = render(source, Layout::of(columns, rows), theme);
     let mut out = std::io::stdout().lock();
     write!(out, "\x1b[?2026h")?;
@@ -318,13 +446,22 @@ fn paint(source: &dyn Source, theme: Theme) -> std::io::Result<()> {
 
 /// Run a browser until the person closes it.
 ///
-/// Returns `Err` only when the terminal itself failed or a signal arrived; a
-/// source's own failures are its [`Source::message`], not the loop's business.
+/// Terminal failures return `Err`. TERM/HUP/INT restore the terminal before
+/// applying their default termination action. A source's own failures are its
+/// [`Source::message`], not the loop's business.
 pub fn run(source: &mut dyn Source) -> std::io::Result<()> {
     let theme = Theme::detect();
     let mut screen = Some(Screen::enter()?);
+    // The event source starts listening for a change of window size when it
+    // is first asked for an event. Asking once before the first paint means a
+    // resize during that paint is seen, not dropped for want of a listener.
+    event::poll(std::time::Duration::ZERO)?;
+    let mut dirty = true;
     loop {
-        paint(source, theme)?;
+        if dirty {
+            paint(source, theme)?;
+            dirty = false;
+        }
         loop {
             if screen.as_ref().is_some_and(Screen::interrupted) {
                 return Err(std::io::Error::other("interrupted"));
@@ -333,8 +470,15 @@ pub fn run(source: &mut dyn Source) -> std::io::Result<()> {
                 break;
             }
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        // Process one event before checking interruption again. Ignored events
+        // never trigger a render, including paste and focus-event floods.
+        let key = match event::read()? {
+            Event::Key(key) => key,
+            Event::Resize(_, _) => {
+                dirty = true;
+                continue;
+            }
+            _ => continue,
         };
         if key.kind == KeyEventKind::Release {
             continue;
@@ -356,16 +500,20 @@ pub fn run(source: &mut dyn Source) -> std::io::Result<()> {
                 let cursor = source.cursor();
                 if cursor > 0 {
                     source.select(cursor - 1);
+                    Answer::Handled
+                } else {
+                    Answer::Ignored
                 }
-                Answer::Handled
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let last = source.entries().len().saturating_sub(1);
                 let cursor = source.cursor();
                 if cursor < last {
                     source.select(cursor + 1);
+                    Answer::Handled
+                } else {
+                    Answer::Ignored
                 }
-                Answer::Handled
             }
             _ => source.key(key),
         };
@@ -375,8 +523,10 @@ pub fn run(source: &mut dyn Source) -> std::io::Result<()> {
                 drop(screen.take());
                 source.suspended();
                 screen = Some(Screen::enter()?);
+                dirty = true;
             }
-            Answer::Handled | Answer::Ignored => {}
+            Answer::Handled => dirty = true,
+            Answer::Ignored => {}
         }
     }
     drop(screen);
@@ -388,6 +538,27 @@ mod tests {
     use super::*;
     use crate::terminal::plain;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn exclusive_ownership_and_setup_failure_release_the_guard() {
+        let first = Screen::enter_with(|| Ok(())).unwrap();
+        assert!(matches!(Screen::enter_with(|| panic!("nested setup ran")),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists));
+        drop(first);
+        assert!(
+            Screen::enter_with(|| Err(std::io::Error::other("injected setup failure"))).is_err()
+        );
+        assert!(
+            SIGNALS
+                .get()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .default_action
+                .load(Ordering::SeqCst)
+        );
+        drop(Screen::enter_with(|| Ok(())).unwrap());
+    }
 
     struct Fake {
         entries: Vec<Entry>,
@@ -508,3 +679,7 @@ mod tests {
         assert!(narrow.contains("Compared with"), "{narrow}");
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "screen_tests.rs"]
+mod screen_tests;

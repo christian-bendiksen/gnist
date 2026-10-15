@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "herda-ui"
 version.workspace = true
 edition.workspace = true
@@ -9,7 +10,27 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+# Ask the terminal whether it scales text, so that large statements are drawn
+# large where it does. The question is put through a cursor query that takes a
+# deadline, which crossterm 0.29 as published does not have: a tool turns this
+# on only where it builds against a crossterm that carries
+# `cursor::position_within`, as Herda's vendored one does. Without it every
+# terminal is taken not to scale text and is never asked. Against a crossterm
+# without that query the feature builds and asks nothing, so `--all-features`
+# over a workspace that vendors this crate is not a build failure.
+text-sizing = []
+# Hold the terminal for a command that happens inside a full-screen frame
+# (`session`). While the screen is up the process's standard output and
+# standard error are turned into a pipe, and Ctrl-C is passed on to the
+# process group. Both are `rustix`, which nothing else in the crate calls, so
+# a tool without such a screen declares nothing new. It builds against
+# crossterm 0.29 as published.
+session = ["dep:rustix"]
+
 [dependencies]
 crossterm = { version = "0.29", default-features = false, features = ["events", "bracketed-paste"] }
+rustix = { version = "1", optional = true, features = ["process", "stdio", "termios"] }
 signal-hook = "0.3"
 unicode-width = "0.2"
+unicode-segmentation = "1.13"

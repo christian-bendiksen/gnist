@@ -10,6 +10,9 @@ edition = "2024"
 version = "0.4.0"
 authors = ["Christian Bendiksen <christian@bendiksen.me>"]
 rust-version = "1.95.0"
+# Inherited only by the vendored crates/herda-ui, whose manifest is Herda's
+# byte for byte and takes its license from the workspace it is built in.
+license = "MIT"
 
 [workspace.lints.rust]
 rust_2018_idioms = { level = "warn", priority = -1 }

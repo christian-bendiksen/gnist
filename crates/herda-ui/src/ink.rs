@@ -115,6 +115,72 @@ impl Ink {
     }
 }
 
+/// A background role: a plate behind text, or the row or key that is picked out.
+///
+/// A wash is never a saturated block. Each one is the terminal's graphite
+/// background lifted a few percent toward the text or toward an accent, the
+/// way the Fold design lays a translucent plate over a window, so the text on
+/// it keeps its own ink and its contrast. A cell carries one beside its
+/// [`Ink`]; with colour off a wash is not drawn at all, which is why nothing
+/// may be told by a wash alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Wash {
+    /// No plate: the terminal's own background.
+    #[default]
+    None,
+    /// A fact tile, the log pane, the command line.
+    Plate,
+    /// A key that can be pressed now.
+    Key,
+    /// The key that moves the command forward.
+    Accent,
+    /// The row the cursor is on.
+    Cursor,
+    /// The plate behind what went wrong.
+    Alarm,
+}
+
+impl Wash {
+    /// The 24-bit form: each overlay of the design composited on `#131618`.
+    const fn truecolor(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Plate => "48;2;28;31;33",
+            Self::Key => "48;2;37;40;41",
+            Self::Accent => "48;2;57;49;33",
+            Self::Cursor => "48;2;36;34;28",
+            Self::Alarm => "48;2;36;31;31",
+        }
+    }
+
+    /// The 256-colour form.
+    ///
+    /// The cube has no dark amber and no dark orange that would pass for a
+    /// wash, so these are steps of the grey ramp: what survives is that a key
+    /// stands off a plate and the forward key stands off the other keys. The
+    /// hue is carried by the ink on top, as it is with colour off.
+    const fn indexed(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Plate => "48;5;234",
+            Self::Cursor => "48;5;235",
+            Self::Alarm => "48;5;236",
+            Self::Key => "48;5;237",
+            Self::Accent => "48;5;238",
+        }
+    }
+
+    /// The escape body for this wash at the depth the terminal supports, empty
+    /// for [`Wash::None`].
+    #[must_use]
+    pub const fn code(self, truecolor: bool) -> &'static str {
+        match truecolor {
+            true => self.truecolor(),
+            false => self.indexed(),
+        }
+    }
+}
+
 /// Every glyph the terminal uses, and the one meaning each carries.
 ///
 /// There were two of these tables, in different crates, and they contradicted
@@ -154,6 +220,29 @@ pub mod glyph {
     pub const RULE: char = '─';
     /// The cursor, where a prompt waits for an answer.
     pub const CURSOR: &str = "▌";
+    /// The row the cursor is on, so it is findable with colour off.
+    pub const ROW: &str = "›";
+    /// The revision the machine runs. The same character as [`WORKING`], doing
+    /// a different job: on the revision line it is a point, not a state.
+    pub const POINT_SELECTED: &str = "●";
+    /// A retained revision the machine does not run.
+    pub const POINT_KEPT: &str = "○";
+    /// A revision that does not exist yet.
+    pub const POINT_AHEAD: &str = "◌";
+    /// Where the files are when they have moved away from every revision.
+    pub const POINT_AWAY: &str = "◇";
+    /// One cell of the part of a change that is done, and of a filled thin bar.
+    pub const LINE_DONE: char = '━';
+    /// The head of that part when it ends in the first half of a cell.
+    pub const LINE_HEAD: char = '╸';
+    /// One cell of the part of a change that is still ahead.
+    pub const LINE_AHEAD: char = '╌';
+    /// Where the line comes in from revisions there is no room to draw.
+    pub const LINE_FROM: char = '╶';
+    /// Where the line goes on to revisions there is no room to draw.
+    pub const LINE_ON: char = '╴';
+    /// A graph column's eight heights within one cell, lowest first.
+    pub const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 }
 
 /// The seam's colour stops: the rule grey lifted toward the brand amber and
@@ -250,6 +339,58 @@ mod tests {
                     panic!("{ink:?} and {other:?} both emit {code} (truecolor {truecolor})");
                 }
             }
+        }
+    }
+
+    /// A wash that rendered like another would make a key look like a plate.
+    #[test]
+    fn no_two_washes_render_alike() {
+        let washes = [
+            Wash::Plate,
+            Wash::Key,
+            Wash::Accent,
+            Wash::Cursor,
+            Wash::Alarm,
+        ];
+        for truecolor in [true, false] {
+            let mut seen = std::collections::BTreeMap::new();
+            for wash in washes {
+                let code = wash.code(truecolor);
+                assert!(code.starts_with("48;"), "{wash:?} sets only a background");
+                if let Some(other) = seen.insert(code, wash) {
+                    panic!("{wash:?} and {other:?} both emit {code} (truecolor {truecolor})");
+                }
+            }
+            assert_eq!(Wash::None.code(truecolor), "");
+        }
+    }
+
+    /// Every character the revision line and the graph are built from takes
+    /// one cell, or the line would not land where it was measured.
+    #[test]
+    fn the_line_characters_are_one_cell_each() {
+        use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+        for text in [
+            glyph::POINT_SELECTED,
+            glyph::POINT_KEPT,
+            glyph::POINT_AHEAD,
+            glyph::POINT_AWAY,
+            glyph::ROW,
+        ] {
+            assert_eq!(text.width(), 1, "{text}");
+        }
+        for character in [
+            glyph::LINE_DONE,
+            glyph::LINE_HEAD,
+            glyph::LINE_AHEAD,
+            glyph::LINE_FROM,
+            glyph::LINE_ON,
+            glyph::RULE,
+        ]
+        .into_iter()
+        .chain(glyph::LEVELS)
+        {
+            assert_eq!(character.width(), Some(1), "{character}");
         }
     }
 

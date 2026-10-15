@@ -1,7 +1,7 @@
 # Herda terminal components
 
 This is a source snapshot of `crates/herda-ui` from Herda commit
-`3bbd29a614b7cf084997d29b29ac5897a9239ed7`.
+`46c55ab77998ad5500e1e78aa9afcd9eac5ba41d`.
 
 The implementation belongs to Herda. Keep its Cargo.toml and src/ byte-for-byte
 identical when updating this snapshot. Make renderer changes upstream, then
@@ -26,12 +26,25 @@ upstream and refresh instead.
 
 | file | bytes | lines |
 | --- | --- | --- |
-| Cargo.toml | 334 | 15 |
-| src/browser.rs | 18222 | 510 |
-| src/document.rs | 20779 | 593 |
-| src/ink.rs | 11088 | 295 |
-| src/lib.rs | 1881 | 37 |
-| src/presentation.rs | 8993 | 256 |
-| src/progress.rs | 22544 | 646 |
-| src/terminal.rs | 21826 | 612 |
-| src/width.rs | 9029 | 260 |
+| Cargo.toml | 1523 | 36 |
+| src/browser.rs | 24778 | 685 |
+| src/cells.rs | 44854 | 1212 |
+| src/document.rs | 21345 | 613 |
+| src/frame_fixtures.rs | 22190 | 657 |
+| src/frame.rs | 28615 | 815 |
+| src/frame_tests.rs | 23352 | 620 |
+| src/ink.rs | 16386 | 436 |
+| src/lib.rs | 3569 | 76 |
+| src/pieces.rs | 76519 | 2207 |
+| src/presentation.rs | 9450 | 265 |
+| src/progress.rs | 24338 | 694 |
+| src/revision_line.rs | 46239 | 1204 |
+| src/scale.rs | 14547 | 352 |
+| src/screen_tests.rs | 5666 | 201 |
+| src/session.rs | 29354 | 763 |
+| src/session_tests.rs | 8594 | 291 |
+| src/surface.rs | 5381 | 151 |
+| src/surface_tests.rs | 1975 | 65 |
+| src/terminal.rs | 25204 | 690 |
+| src/width.rs | 9496 | 269 |
+| src/work.rs | 23172 | 659 |

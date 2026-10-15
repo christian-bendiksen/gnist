@@ -110,7 +110,7 @@ impl Transfer {
         }
     }
 
-    const fn ink(&self) -> Ink {
+    pub(crate) const fn ink(&self) -> Ink {
         if self.complete {
             Ink::Green
         } else if self.bytes > 0 {
@@ -171,6 +171,16 @@ impl Region {
     /// without waiting for a download.
     #[must_use]
     pub fn lines(&self, layout: Layout, theme: Theme) -> Vec<String> {
+        if layout.columns() <= crate::width::GUTTER || layout.rows() == 0 {
+            return Vec::new();
+        }
+        if !layout.staged() {
+            let label = self
+                .stages
+                .get(self.current())
+                .map_or(self.title.as_str(), |stage| stage.label.as_str());
+            return vec![theme.paint(&clip(label, layout.content()), Ink::Gold, true)];
+        }
         let rows = layout.rows();
         let width = layout.content();
         let mut lines = vec![theme.heading(&self.title, &self.badge, width)];
@@ -331,7 +341,7 @@ impl Region {
 }
 
 /// `22.5 / 32.4 MiB` — the unit is written once when both halves share it.
-fn moved(transfer: &Transfer) -> String {
+pub(crate) fn moved(transfer: &Transfer) -> String {
     let bytes = size_label(transfer.bytes);
     let total = transfer.total.map_or_else(|| "?".to_owned(), size_label);
     let unit = |text: &str| text.split_once(' ').map(|(_, unit)| unit.to_owned());
@@ -432,7 +442,14 @@ impl Line {
     pub fn start(label: &str) -> Self {
         let theme = crate::presentation::theme();
         let interactive = crate::terminal::interactive_output();
-        let line = theme.hairline(label, "", Layout::detect().content());
+        let line = theme.hairline(
+            label,
+            "",
+            Layout::detect()
+                .columns()
+                .saturating_sub(crate::width::GUTTER)
+                .min(crate::width::REFERENCE),
+        );
         if interactive {
             print!("{line}");
             let _ = std::io::stdout().flush();
@@ -459,16 +476,26 @@ impl Line {
             return;
         }
         let layout = Layout::detect();
-        let mut rendered = format!("{} {done}/{total}", self.theme.bar(done, total, 16));
+        // The counter and tail are part of the row budget, so the bar width is
+        // derived from what is beside it rather than a fixed 16 cells that could
+        // push the line past the terminal.
+        let mut beside = format!("{done}/{total}");
         if !tail.is_empty() {
-            rendered.push(' ');
-            rendered.push_str(glyph::SEPARATOR);
-            rendered.push(' ');
-            rendered.push_str(tail);
+            beside.push(' ');
+            beside.push_str(glyph::SEPARATOR);
+            beside.push(' ');
+            beside.push_str(tail);
         }
-        let line = self
-            .theme
-            .hairline(&self.label, &rendered, layout.content());
+        let bar_cells = layout.bar_cells(&beside);
+        let rendered = format!("{} {beside}", self.theme.bar(done, total, bar_cells));
+        let line = self.theme.hairline(
+            &self.label,
+            &rendered,
+            layout
+                .columns()
+                .saturating_sub(crate::width::GUTTER)
+                .min(crate::width::REFERENCE),
+        );
         print!("\r\x1b[2K{line}");
         let _ = std::io::stdout().flush();
     }
@@ -487,6 +514,27 @@ mod tests {
     use super::*;
     use crate::terminal::plain;
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn tiny_regions_have_no_overflow_or_phantom_rows() {
+        for columns in 0..=100 {
+            for rows in 0..=30 {
+                for theme in [Theme::FULL, Theme::PLAIN] {
+                    let lines = region().lines(Layout::of(columns, rows), theme);
+                    if columns <= crate::width::GUTTER || rows == 0 {
+                        assert!(lines.is_empty());
+                    }
+                    assert!(lines.len() <= rows);
+                    for line in lines {
+                        assert!(
+                            plain(&line).width() + 2 <= columns,
+                            "{columns}x{rows}: {line:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     fn region() -> Region {
         Region {
