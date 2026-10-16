@@ -4,10 +4,9 @@ use std::{fs, path::Path};
 enum Wm {
     Hyprland,
     Niri,
-    Mango,
 }
 
-const ALL: &[Wm] = &[Wm::Hyprland, Wm::Niri, Wm::Mango];
+const ALL: &[Wm] = &[Wm::Hyprland, Wm::Niri];
 
 #[derive(Default)]
 pub struct BorderColors {
@@ -26,7 +25,6 @@ impl Wm {
         match self {
             Self::Hyprland => "hyprland.conf",
             Self::Niri => "niri-colors.kdl",
-            Self::Mango => "mango.conf",
         }
     }
 
@@ -34,7 +32,6 @@ impl Wm {
         match self {
             Self::Hyprland => parse_hyprland(conf),
             Self::Niri => parse_niri(conf),
-            Self::Mango => parse_mango(conf),
         }
     }
 }
@@ -86,23 +83,5 @@ fn parse_niri(conf: &str) -> BorderColors {
     BorderColors {
         active: find("active-color"),
         inactive: find("inactive-color"),
-    }
-}
-
-fn parse_mango(conf: &str) -> BorderColors {
-    let find = |key: &str| -> Option<String> {
-        conf.lines().map(str::trim).find_map(|line| {
-            let rest = line
-                .strip_prefix(key)?
-                .trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '=')
-                .trim();
-            let hex8 = rest.strip_prefix("0x")?;
-            (hex8.len() == 8).then(|| format!("#{}", &hex8[..6]))
-        })
-    };
-
-    BorderColors {
-        active: find("focuscolor"),
-        inactive: find("unfocuscolor"),
     }
 }
