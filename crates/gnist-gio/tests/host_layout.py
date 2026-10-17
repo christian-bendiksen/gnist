@@ -5,7 +5,22 @@ Needs a C compiler, pkg-config with gtk4 and gtk+-3.0, Xvfb (xvfb-run) and
 dbus-run-session. Run from anywhere:
 
     python3 crates/gnist-gio/tests/host_layout.py
+
+By default the toolkit is upstream GTK and the host stands in for the
+patched property. Against Herda's patched GTK, put its libraries first on
+LD_LIBRARY_PATH and set
+
+    LAYOUT_HOST_TOOLKIT=real   the toolkit's own property and startup read;
+                               the stand-in and unpatched cases are skipped
+    LAYOUT_HOST_GTK=4          which GTKs to test (default 4,3)
+    LAYOUT_HOST_EXPECT_LIB=/usr/lib/herda/gtk-layout
+                               fail unless libgtk is loaded from there
+    GNIST_GIO_MODULE=/path/libgnist_gio.so
+                               a module built elsewhere (default: cargo build)
+
+Each host prints the libgtk, GLib and gnist-gio it actually mapped.
 """
+import hashlib
 import json
 import os
 import queue
@@ -44,7 +59,13 @@ class Host:
         self.stderr = []
         threading.Thread(target=self._pump, args=(self.process.stdout, self.lines.put), daemon=True).start()
         threading.Thread(target=self._pump, args=(self.process.stderr, self.stderr.append), daemon=True).start()
-        self.first_window = self.expect('WINDOW 1').split()[2]
+        self.libraries = []
+        while (line := self.expect('', timeout=TIMEOUT)) != 'LIB-END' and not line.startswith('WINDOW 1'):
+            if line.startswith('LIB '):
+                self.libraries.append(line[4:])
+        if not line.startswith('WINDOW 1'):
+            line = self.expect('WINDOW 1')
+        self.first_window = line.split()[2]
         self.expect('READY')
 
     @staticmethod
@@ -107,12 +128,32 @@ def build(scratch, gtk):
     return binary
 
 
+REAL = os.environ.get('LAYOUT_HOST_TOOLKIT') == 'real'
+
+
+def stand_in(patched):
+    """LAYOUT_HOST_PATCHED for a case that wants the property."""
+    return ('real' if REAL else '1') if patched else '0'
+
+
+def check_libraries(host, name, reported=set()):
+    if name in reported:
+        return
+    reported.add(name)
+    for library in host.libraries:
+        print(f'   {name} loaded {library}')
+    expected = os.environ.get('LAYOUT_HOST_EXPECT_LIB')
+    if expected:
+        gtk = [library for library in host.libraries if '/libgtk' in library]
+        assert gtk and all(library.startswith(expected) for library in gtk), gtk
+
+
 def scenario(binary, modules, scratch, *, patched, load, early_read):
     home = Path(tempfile.mkdtemp(dir=scratch))
     config = home / 'config'
     path = config / 'herda/gtk-layout.ini'
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
-               GNIST_TRANSITION_MS='0', LAYOUT_HOST_PATCHED='1' if patched else '0',
+               GNIST_TRANSITION_MS='0', LAYOUT_HOST_PATCHED=stand_in(patched),
                LAYOUT_HOST_MODULES=load, LAYOUT_HOST_EARLY_READ='1' if early_read else '0')
     if load != 'absent':
         env['GIO_EXTRA_MODULES'] = str(modules)
@@ -133,6 +174,7 @@ def scenario(binary, modules, scratch, *, patched, load, early_read):
     # The file exists before the application starts.
     replace_atomically(path, layout_doc('herda-desktop'))
     host = Host(binary, env)
+    check_libraries(host, binary.name)
     if load == 'absent':
         # Only the toolkit's own read: right at first paint, no live changes.
         assert host.first_window == ('herda-desktop' if early_read else 'native')
@@ -224,7 +266,7 @@ def missing_directory(binary, modules, scratch):
     config = home / 'config'
     path = config / 'herda/gtk-layout.ini'
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
-               GIO_EXTRA_MODULES=str(modules), LAYOUT_HOST_PATCHED='1', LAYOUT_HOST_MODULES='late',
+               GIO_EXTRA_MODULES=str(modules), LAYOUT_HOST_PATCHED=stand_in(True), LAYOUT_HOST_MODULES='late',
                LAYOUT_HOST_EARLY_READ='1')
     host = Host(binary, env)
     assert host.first_window == 'native'
@@ -248,7 +290,8 @@ def crossfade(binary, modules, scratch):
     home = Path(tempfile.mkdtemp(dir=scratch))
     config = home / 'config'
     env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
-               GIO_EXTRA_MODULES=str(modules), GNIST_TRANSITION_MS='1200', LAYOUT_HOST_MODULES='late')
+               GIO_EXTRA_MODULES=str(modules), GNIST_TRANSITION_MS='1200', LAYOUT_HOST_MODULES='late',
+               LAYOUT_HOST_PATCHED=stand_in(REAL))
     css = config / 'gnist/themes/current/gtk.css'
     css.parent.mkdir(parents=True)
     css.write_text('window { }\n')
@@ -279,32 +322,38 @@ def crossfade(binary, modules, scratch):
 
 
 def main():
-    for tool in ['cc', 'pkg-config', 'xvfb-run', 'dbus-run-session', 'dbus-send', 'cargo']:
+    tools = ['cc', 'pkg-config', 'xvfb-run', 'dbus-run-session', 'dbus-send']
+    for tool in tools + ([] if os.environ.get('GNIST_GIO_MODULE') else ['cargo']):
         if not shutil.which(tool):
             sys.exit(f'missing {tool}')
     if os.environ.get('LAYOUT_HOST_INNER') != '1':
-        subprocess.run(['cargo', 'build', '-p', 'gnist-gio'], cwd=WORKSPACE, check=True)
+        if not os.environ.get('GNIST_GIO_MODULE'):
+            subprocess.run(['cargo', 'build', '-p', 'gnist-gio'], cwd=WORKSPACE, check=True)
         env = dict(os.environ, LAYOUT_HOST_INNER='1', GDK_BACKEND='x11', NO_AT_BRIDGE='1', GTK_A11Y='none')
         for key in ['WAYLAND_DISPLAY', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']:
             env.pop(key, None)
         sys.exit(subprocess.run(['xvfb-run', '-a', 'dbus-run-session', '--', sys.executable, __file__],
                                 env=env).returncode)
 
-    target = Path(os.environ.get('CARGO_TARGET_DIR', WORKSPACE / 'target')) / 'debug/libgnist_gio.so'
+    target = Path(os.environ.get('GNIST_GIO_MODULE') or
+                  Path(os.environ.get('CARGO_TARGET_DIR', WORKSPACE / 'target')) / 'debug/libgnist_gio.so')
+    print(f'module {target} sha256 {hashlib.sha256(target.read_bytes()).hexdigest()}')
     with tempfile.TemporaryDirectory(prefix='gnist-layout-') as temporary:
         scratch = Path(temporary)
         modules = scratch / 'modules'
         modules.mkdir()
         shutil.copy2(target, modules / 'libgnist_gio.so')
-        for gtk in [4, 3]:
+        for gtk in [int(major) for major in os.environ.get('LAYOUT_HOST_GTK', '4,3').split(',')]:
             binary = build(scratch, gtk)
             crossfade(binary, modules, scratch)
             missing_directory(binary, modules, scratch)
+            # A patched toolkit always reads the file at startup itself.
             for load in ['late', 'early', 'thread', 'absent']:
-                for early_read in [False, True]:
+                for early_read in [True] if REAL else [False, True]:
                     scenario(binary, modules, scratch, patched=True, load=load, early_read=early_read)
-            for load in ['late', 'early']:
-                scenario(binary, modules, scratch, patched=False, load=load, early_read=False)
+            if not REAL:
+                for load in ['late', 'early']:
+                    scenario(binary, modules, scratch, patched=False, load=load, early_read=False)
 
 
 if __name__ == '__main__':

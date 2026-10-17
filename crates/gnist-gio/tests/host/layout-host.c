@@ -2,7 +2,8 @@
  *
  * Built against GTK 3 or GTK 4. With LAYOUT_HOST_PATCHED=1 it gives GtkSettings
  * a "gtk-herda-layout" string property, standing in for the patched toolkit;
- * otherwise GtkSettings is upstream's. LAYOUT_HOST_EARLY_READ=1 also stands in
+ * with LAYOUT_HOST_PATCHED=real the toolkit must already have it (a patched
+ * build); otherwise GtkSettings is upstream's. LAYOUT_HOST_EARLY_READ=1 also stands in
  * for the toolkit's own read of gtk-layout.ini at startup.
  *
  * It loads gnist-gio the way applications do, through GIO_EXTRA_MODULES:
@@ -99,6 +100,32 @@ build_window (void)
   printf ("WINDOW %d %s\n", ++windows, layout);
   fflush (stdout);
   g_free (layout);
+}
+
+/* Which toolkit and module this process really runs: LIB <path> lines. */
+static void
+report_libraries (void)
+{
+  char *maps = NULL;
+  char **lines;
+  GHashTable *seen = g_hash_table_new (g_str_hash, g_str_equal);
+
+  if (!g_file_get_contents ("/proc/self/maps", &maps, NULL, NULL))
+    return;
+  lines = g_strsplit (maps, "\n", -1);
+  for (char **line = lines; *line; line++)
+    {
+      const char *path = strchr (*line, '/');
+      if (path && (strstr (path, "libgtk") || strstr (path, "libgdk-3") || strstr (path, "libadwaita") ||
+                   strstr (path, "libgnist_gio") || strstr (path, "libglib-2.0") || strstr (path, "libgio-2.0")) &&
+          g_hash_table_add (seen, (gpointer) path))
+        printf ("LIB %s\n", path);
+    }
+  printf ("LIB-END\n");
+  fflush (stdout);
+  g_hash_table_unref (seen);
+  g_strfreev (lines);
+  g_free (maps);
 }
 
 static void
@@ -206,6 +233,7 @@ int
 main (int argc, char **argv)
 {
   gboolean patched = g_strcmp0 (g_getenv ("LAYOUT_HOST_PATCHED"), "1") == 0;
+  gboolean real = g_strcmp0 (g_getenv ("LAYOUT_HOST_PATCHED"), "real") == 0;
   const char *modules = g_getenv ("LAYOUT_HOST_MODULES");
   GIOChannel *input;
 
@@ -227,6 +255,14 @@ main (int argc, char **argv)
 #endif
   if (g_strcmp0 (modules, "late") == 0)
     g_vfs_get_default ();
+
+  if (real && !g_object_class_find_property (G_OBJECT_GET_CLASS (gtk_settings_get_default ()),
+                                             LAYOUT_PROPERTY))
+    {
+      fprintf (stderr, "layout-host: this GTK has no " LAYOUT_PROPERTY "\n");
+      return 3;
+    }
+  report_libraries ();
 
   g_signal_connect (gtk_settings_get_default (), "notify::" LAYOUT_PROPERTY,
                     G_CALLBACK (on_layout), NULL);
