@@ -1,5 +1,6 @@
 mod config;
 mod dbus;
+mod layout;
 mod style;
 mod symbols;
 
@@ -65,6 +66,7 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn g_io_module_unload(_module: *mut c_void) {
     dbus::unsubscribe();
+    layout::detach();
     style::cleanup();
     ox_log!("module unloaded version={}", config::VERSION);
 }
@@ -106,6 +108,7 @@ fn attach_or_retry(attempt: u32) {
     );
 
     style::attach(gtk);
+    layout::attach();
     dbus::subscribe();
 }
 
