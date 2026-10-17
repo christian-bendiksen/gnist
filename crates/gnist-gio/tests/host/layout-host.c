@@ -18,6 +18,8 @@
  * "reduce-motion" turns animations off, "quit" (or EOF) exits.
  */
 #include <gtk/gtk.h>
+#include <glib/gstdio.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -37,7 +39,11 @@ read_layout_file (void)
   char *schema = NULL, *layout = NULL;
   gboolean desktop = FALSE;
 
-  if (g_key_file_load_from_file (file, path, G_KEY_FILE_NONE, NULL))
+  GStatBuf st;
+
+  /* Only a regular file of at most 64 KiB, as the toolkit reads it. */
+  if (g_stat (path, &st) == 0 && S_ISREG (st.st_mode) && st.st_size <= 64 * 1024 &&
+      g_key_file_load_from_file (file, path, G_KEY_FILE_NONE, NULL))
     {
       schema = g_key_file_get_string (file, "GtkLayout", "Schema", NULL);
       layout = g_key_file_get_string (file, "GtkLayout", "Layout", NULL);

@@ -173,6 +173,20 @@ def scenario(binary, modules, scratch, *, patched, load, early_read):
         replace_atomically(path, layout_doc('herda-desktop'))
         assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
 
+    # A FIFO in its place is native, and neither freezes the application nor
+    # sets the directory monitor reading in a loop.
+    path.unlink()
+    os.mkfifo(path)
+    assert host.expect('NOTIFY') == 'NOTIFY native'
+    time.sleep(1.0)
+    events = sum('layout event' in line for line in host.stderr)
+    time.sleep(1.0)
+    assert sum('layout event' in line for line in host.stderr) == events, 'monitor loops on a FIFO'
+    assert host.window() == 'native', 'the application still answers'
+    path.unlink()
+    replace_atomically(path, layout_doc('herda-desktop'))
+    assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
+
     # Removing the file is native; so is removing its directory, and both
     # coming back -- directory first, then the file -- is followed live.
     path.unlink()

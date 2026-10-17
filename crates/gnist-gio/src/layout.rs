@@ -23,6 +23,8 @@ pub const SCHEMA: &str = "org.herda.GtkLayout";
 pub const SCHEMA_VERSION: i32 = 1;
 const DIRECTORY: &str = "herda";
 const FILE_NAME: &str = "gtk-layout.ini";
+// The toolkit's limit; a larger file is native for both readers.
+const MAX_FILE_BYTES: u64 = 64 * 1024;
 // Coalesces the events of one replacement into a single read.
 const SETTLE: Duration = Duration::from_millis(40);
 
@@ -65,14 +67,22 @@ impl Layout {
         Self::from_nick(&layout).ok_or_else(|| format!("unknown layout {layout:?}"))
     }
 
-    /// Read the authoritative file with the same GLib loader the toolkit
-    /// uses, so the first frame and later changes agree on every input.
+    /// Read the authoritative file by the toolkit's startup rules, so the
+    /// first frame and later changes agree on every input: only a regular
+    /// file (symlinks followed) of at most 64 KiB, parsed by GKeyFile.
     pub fn read(path: &Path) -> Self {
-        let file = glib::KeyFile::new();
-        if let Err(error) = file.load_from_file(path, glib::KeyFileFlags::NONE) {
-            if !error.matches(glib::FileError::Noent) {
-                ox_log!("layout file {} unreadable: {error}", path.display());
+        let bytes = match read_regular(path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    ox_log!("layout file {} not read: {error}", path.display());
+                }
+                return Self::Native;
             }
+        };
+        let file = glib::KeyFile::new();
+        if let Err(error) = file.load_from_bytes(&glib::Bytes::from_owned(bytes), glib::KeyFileFlags::NONE) {
+            ox_log!("layout file {} ignored: {error}", path.display());
             return Self::Native;
         }
         Self::from_key_file(&file).unwrap_or_else(|error| {
@@ -80,6 +90,32 @@ impl Layout {
             Self::Native
         })
     }
+}
+
+/// The file's bytes if it is a regular file within the size limit. Opening
+/// without blocking and checking the open file means a FIFO, even one swapped
+/// in after a check, can never stall the main loop.
+fn read_regular(path: &Path) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(std::io::Error::other("larger than 64 KiB"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(std::io::Error::other("larger than 64 KiB"));
+    }
+    Ok(bytes)
 }
 
 /// GLib's user configuration directory, exactly as the toolkit's startup
@@ -363,46 +399,111 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
-    /// The fixture cases shared with the patched toolkit's reader. An explicit
-    /// `GTK_LAYOUT_FIXTURES` must hold them; Herda's tree beside this
-    /// repository is only used when present.
+    const FIXTURE_CHILD: &str = "GNIST_LAYOUT_FIXTURE_CHILD";
+
+    /// The cases shared with the patched toolkit's reader, unchanged: an
+    /// explicit `GTK_LAYOUT_FIXTURES` must hold them all; Herda's tree beside
+    /// this repository is used when present. Each case is installed in its
+    /// own configuration directory and read in a fresh, time-limited process,
+    /// so a reader that blocked on the FIFO case fails instead of hanging.
     #[test]
     fn shared_fixtures() {
-        let manifest_in = |directory: &Path| std::fs::read_to_string(directory.join("expected.tsv"));
-        let (directory, manifest) = match std::env::var_os("GTK_LAYOUT_FIXTURES") {
-            Some(directory) => {
-                let directory = PathBuf::from(directory);
-                let manifest = manifest_in(&directory)
-                    .unwrap_or_else(|error| panic!("GTK_LAYOUT_FIXTURES={}: {error}", directory.display()));
-                (directory, manifest)
-            }
+        let directory = match std::env::var_os("GTK_LAYOUT_FIXTURES") {
+            Some(directory) => PathBuf::from(directory),
             None => {
-                let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../../herda/distro/patches/gtk-layout-fixtures");
-                let Ok(manifest) = manifest_in(&directory) else {
-                    eprintln!("no shared fixtures at {}; set GTK_LAYOUT_FIXTURES to require them", directory.display());
+                let sibling = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../herda/distro/build/patches/gtk-layout-fixtures");
+                if !sibling.join("expected.tsv").is_file() {
+                    eprintln!("no shared fixtures at {}; set GTK_LAYOUT_FIXTURES to require them", sibling.display());
                     return;
-                };
-                (directory, manifest)
+                }
+                sibling
             }
         };
-        // Every case listed exists, and every file present is a listed case.
+        let manifest = std::fs::read_to_string(directory.join("expected.tsv"))
+            .unwrap_or_else(|error| panic!("{}/expected.tsv: {error}", directory.display()));
+        let scratch = std::env::temp_dir().join(format!("gnist-fixtures-{}", std::process::id()));
         let mut listed = std::collections::BTreeSet::new();
-        for line in manifest.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')) {
-            let (name, expected) = line.split_once(char::is_whitespace).expect("NAME EXPECTED");
-            let expected = Layout::from_nick(expected.trim()).expect("expected layout");
-            let path = directory.join(name);
-            assert!(path.is_file(), "listed fixture {name} is missing");
-            assert_eq!(Layout::read(&path), expected, "{name}");
-            assert!(listed.insert(name.to_owned()), "{name} is listed twice");
+
+        for line in manifest.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#')) {
+            let fields: Vec<&str> = line.split('\t').collect();
+            let [case, kind, expected] = fields[..] else { panic!("expected CASE KIND EXPECTED: {line:?}") };
+            let expected = Layout::from_nick(expected).unwrap_or_else(|| panic!("{case}: layout {expected:?}"));
+            assert!(listed.insert(case.to_owned()), "{case} is listed twice");
+
+            let config = scratch.join(case);
+            let herda = config.join(DIRECTORY);
+            let target = herda.join(FILE_NAME);
+            if kind != "missing-dir" {
+                std::fs::create_dir_all(&herda).unwrap();
+            }
+            match kind {
+                "file" => {
+                    let source = directory.join(format!("{case}.ini"));
+                    assert!(source.is_file(), "listed fixture {case}.ini is missing");
+                    std::fs::copy(&source, &target).unwrap();
+                }
+                "missing-file" | "missing-dir" => {}
+                "directory" => std::fs::create_dir(&target).unwrap(),
+                "fifo" => {
+                    let path = std::ffi::CString::new(target.to_str().unwrap()).unwrap();
+                    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+                }
+                "symlink" => {
+                    let source = directory.join("valid-herda.ini");
+                    std::os::unix::fs::symlink(std::fs::canonicalize(source).unwrap(), &target).unwrap();
+                }
+                other => panic!("{case}: unknown kind {other:?}"),
+            }
+            assert_eq!(read_in_child(&config), expected, "{case} ({kind})");
         }
-        let present: std::collections::BTreeSet<String> = std::fs::read_dir(&directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .filter(|name| name != "expected.tsv")
-            .collect();
-        assert_eq!(present, listed, "fixtures present and listed differ");
+
+        // Every fixture file is a listed case: none is silently left out.
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            if let Some(case) = name.strip_suffix(".ini") {
+                assert!(listed.contains(case), "{name} is not listed in expected.tsv");
+            }
+        }
         assert!(!listed.is_empty());
+        eprintln!("{} shared cases from {} agree", listed.len(), directory.display());
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// Read the layout in a fresh test process whose XDG_CONFIG_HOME is `config`.
+    fn read_in_child(config: &Path) -> Layout {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "layout::tests::fixture_child", "--nocapture", "--test-threads=1"])
+            .env(FIXTURE_CHILD, "1")
+            .env("XDG_CONFIG_HOME", config)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("reading {} did not finish", config.display());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut output = String::new();
+        std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut output).unwrap();
+        // libtest prints the child's line after its own "test ... " prefix.
+        let (_, rest) = output.split_once("LAYOUT ").expect("child result");
+        Layout::from_nick(rest.split_whitespace().next().unwrap_or_default()).expect("child layout")
+    }
+
+    #[test]
+    fn fixture_child() {
+        if std::env::var_os(FIXTURE_CHILD).is_none() {
+            return;
+        }
+        // Resolved as the toolkit does, from this process's XDG_CONFIG_HOME.
+        let layout = Layout::read(&config_path());
+        println!("LAYOUT {}", layout.nick());
     }
 
     // Stand-in for a patched GtkSettings.
