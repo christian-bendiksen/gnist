@@ -17,6 +17,8 @@ LD_LIBRARY_PATH and set
                                fail unless libgtk is loaded from there
     GNIST_GIO_MODULE=/path/libgnist_gio.so
                                a module built elsewhere (default: cargo build)
+    LAYOUT_HOST_CSS=/path/gtk.css
+                               the theme the crossfade reloads (default: a stub)
 
 Each host prints the libgtk, GLib and gnist-gio it actually mapped.
 """
@@ -294,7 +296,8 @@ def crossfade(binary, modules, scratch):
                LAYOUT_HOST_PATCHED=stand_in(REAL))
     css = config / 'gnist/themes/current/gtk.css'
     css.parent.mkdir(parents=True)
-    css.write_text('window { }\n')
+    css.write_text(Path(os.environ['LAYOUT_HOST_CSS']).read_text() if os.environ.get('LAYOUT_HOST_CSS')
+                   else 'window { }\n')
     host = Host(binary, env)
     host.wait_log('subscribed to D-Bus')
     before = host.opacity()
