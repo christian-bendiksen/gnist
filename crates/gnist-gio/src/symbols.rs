@@ -20,6 +20,8 @@ pub type WindowGetChild = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub type WindowListToplevels = unsafe extern "C" fn() -> *mut GList;
 pub type ListFree = unsafe extern "C" fn(*mut c_void);
 pub type DisplayManagerGet = unsafe extern "C" fn() -> *mut c_void;
+pub type DisplayManagerListDisplays = unsafe extern "C" fn(*mut c_void) -> *mut GList;
+pub type ObjectGetter = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub type SignalConnectData = unsafe extern "C" fn(
     *mut c_void,
     *const c_char,
@@ -60,6 +62,11 @@ pub struct CoreSyms {
     pub gtk_window_list_toplevels: Option<WindowListToplevels>,
     pub g_list_free: Option<ListFree>,
     pub gdk_display_manager_get: Option<DisplayManagerGet>,
+    // A GSList, whose leading fields match GList's `data` and `next`.
+    pub gdk_display_manager_list_displays: Option<DisplayManagerListDisplays>,
+    pub gtk_settings_get_for_display: Option<ObjectGetter>,
+    pub gdk_display_get_default_screen: Option<ObjectGetter>,
+    pub gtk_settings_get_for_screen: Option<ObjectGetter>,
     pub g_signal_connect_data: Option<SignalConnectData>,
 }
 
@@ -95,6 +102,10 @@ pub fn core() -> Option<&'static CoreSyms> {
             gtk_window_list_toplevels: symbol(b"gtk_window_list_toplevels\0"),
             g_list_free: symbol(b"g_list_free\0"),
             gdk_display_manager_get: symbol(b"gdk_display_manager_get\0"),
+            gdk_display_manager_list_displays: symbol(b"gdk_display_manager_list_displays\0"),
+            gtk_settings_get_for_display: symbol(b"gtk_settings_get_for_display\0"),
+            gdk_display_get_default_screen: symbol(b"gdk_display_get_default_screen\0"),
+            gtk_settings_get_for_screen: symbol(b"gtk_settings_get_for_screen\0"),
             g_signal_connect_data: symbol(b"g_signal_connect_data\0"),
         }
     };

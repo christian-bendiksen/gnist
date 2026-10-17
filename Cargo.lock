@@ -347,7 +347,6 @@ dependencies = [
  "gio",
  "glib",
  "libc",
- "serde_json",
 ]
 
 [[package]]

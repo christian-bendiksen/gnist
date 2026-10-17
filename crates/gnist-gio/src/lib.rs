@@ -108,7 +108,7 @@ fn attach_or_retry(attempt: u32) {
     );
 
     style::attach(gtk);
-    layout::attach();
+    layout::attach(gtk);
     dbus::subscribe();
 }
 

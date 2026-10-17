@@ -563,7 +563,5 @@ unsafe extern "C" fn on_display_opened(
     let gtk = PENDING_DISPLAY_ATTACH.with(|pending| pending.take());
     if let Some(gtk) = gtk {
         attach(gtk);
-        // GTK 3 has no default GtkSettings until its first display opens.
-        crate::layout::refresh("display-opened");
     }
 }

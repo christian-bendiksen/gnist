@@ -2,8 +2,12 @@
  *
  * Built against GTK 3 or GTK 4. With LAYOUT_HOST_PATCHED=1 it gives GtkSettings
  * a "gtk-herda-layout" string property, standing in for the patched toolkit;
- * otherwise GtkSettings is upstream's. It loads gnist-gio the way an
- * application does, through GIO_EXTRA_MODULES, and reports on stdout:
+ * otherwise GtkSettings is upstream's. LAYOUT_HOST_EARLY_READ=1 also stands in
+ * for the toolkit's own read of gtk-layout.ini at startup.
+ *
+ * It loads gnist-gio the way applications do, through GIO_EXTRA_MODULES:
+ * LAYOUT_HOST_MODULES=early (before gtk_init), thread (before gtk_init, from
+ * a worker thread) or late (after it). It reports on stdout:
  *
  *   NOTIFY <layout>          GtkSettings:gtk-herda-layout changed
  *   WINDOW <n> <layout>      a window built now would read this layout
@@ -18,6 +22,31 @@
 
 static GMainLoop *loop;
 static int windows;
+static char *initial_layout;
+
+/* The toolkit's rules: anything but a complete version 1 group is native. */
+static char *
+read_layout_file (void)
+{
+  char *path = g_build_filename (g_get_user_config_dir (), "herda", "gtk-layout.ini", NULL);
+  GKeyFile *file = g_key_file_new ();
+  char *schema = NULL, *layout = NULL;
+  gboolean desktop = FALSE;
+
+  if (g_key_file_load_from_file (file, path, G_KEY_FILE_NONE, NULL))
+    {
+      schema = g_key_file_get_string (file, "GtkLayout", "Schema", NULL);
+      layout = g_key_file_get_string (file, "GtkLayout", "Layout", NULL);
+      desktop = g_strcmp0 (schema, "org.herda.GtkLayout") == 0
+                && g_key_file_get_integer (file, "GtkLayout", "Version", NULL) == 1
+                && g_strcmp0 (layout, "herda-desktop") == 0;
+    }
+  g_free (schema);
+  g_free (layout);
+  g_key_file_free (file);
+  g_free (path);
+  return g_strdup (desktop ? "herda-desktop" : "native");
+}
 
 static char *
 current_layout (void)
@@ -114,13 +143,13 @@ patch_settings (void)
 {
   GObjectClass *klass = g_type_class_ref (GTK_TYPE_SETTINGS);
 
-  stand_in_layout = g_strdup ("native");
+  stand_in_layout = g_strdup (initial_layout);
   upstream_set = klass->set_property;
   upstream_get = klass->get_property;
   klass->set_property = stand_in_set;
   klass->get_property = stand_in_get;
   g_object_class_install_property (klass, PROP_LAYOUT,
-                                   g_param_spec_string (LAYOUT_PROPERTY, NULL, NULL, "native",
+                                   g_param_spec_string (LAYOUT_PROPERTY, NULL, NULL, initial_layout,
                                                         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 }
 #else
@@ -128,7 +157,7 @@ static void
 patch_settings (void)
 {
   G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-  gtk_settings_install_property (g_param_spec_string (LAYOUT_PROPERTY, NULL, NULL, "native",
+  gtk_settings_install_property (g_param_spec_string (LAYOUT_PROPERTY, NULL, NULL, initial_layout,
                                                       G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
   G_GNUC_END_IGNORE_DEPRECATIONS
 }
@@ -138,13 +167,18 @@ int
 main (int argc, char **argv)
 {
   gboolean patched = g_strcmp0 (g_getenv ("LAYOUT_HOST_PATCHED"), "1") == 0;
-  gboolean early = g_strcmp0 (g_getenv ("LAYOUT_HOST_EARLY_MODULES"), "1") == 0;
+  const char *modules = g_getenv ("LAYOUT_HOST_MODULES");
   GIOChannel *input;
 
-  /* Applications load GIO modules either before GTK is initialized (a
-   * GApplication's registration) or after it; both orders must work. */
-  if (early)
+  initial_layout = g_strcmp0 (g_getenv ("LAYOUT_HOST_EARLY_READ"), "1") == 0
+                   ? read_layout_file () : g_strdup ("native");
+
+  /* Applications load GIO modules before GTK is initialized (a
+   * GApplication's registration), from a worker thread, or after it. */
+  if (g_strcmp0 (modules, "early") == 0)
     g_vfs_get_default ();
+  else if (g_strcmp0 (modules, "thread") == 0)
+    g_thread_join (g_thread_new ("modules", (GThreadFunc) g_vfs_get_default, NULL));
   if (patched)
     patch_settings ();
 #if GTK_MAJOR_VERSION >= 4
@@ -152,7 +186,7 @@ main (int argc, char **argv)
 #else
   gtk_init (&argc, &argv);
 #endif
-  if (!early)
+  if (g_strcmp0 (modules, "late") == 0)
     g_vfs_get_default ();
 
   g_signal_connect (gtk_settings_get_default (), "notify::" LAYOUT_PROPERTY,

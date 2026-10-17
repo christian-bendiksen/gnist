@@ -23,16 +23,14 @@ WORKSPACE = CRATE.parent.parent
 TIMEOUT = 10.0
 
 
-def layout_doc(layout, **overrides):
-    doc = {'schema': 'herda.gtk-layout', 'version': 1, 'layout': layout}
-    doc.update(overrides)
-    return json.dumps(doc)
+def layout_doc(layout, schema='org.herda.GtkLayout', version='1'):
+    return f'[GtkLayout]\nSchema={schema}\nVersion={version}\nLayout={layout}\n'
 
 
 def replace_atomically(path, text):
     """Write the way Malm does: a sibling file renamed over the target."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name('.gtk-layout.json.staging')
+    staging = path.with_name('.gtk-layout.ini.staging')
     staging.write_text(text)
     os.replace(staging, path)
 
@@ -46,7 +44,7 @@ class Host:
         self.stderr = []
         threading.Thread(target=self._pump, args=(self.process.stdout, self.lines.put), daemon=True).start()
         threading.Thread(target=self._pump, args=(self.process.stderr, self.stderr.append), daemon=True).start()
-        self.expect('WINDOW 1')
+        self.first_window = self.expect('WINDOW 1').split()[2]
         self.expect('READY')
 
     @staticmethod
@@ -105,16 +103,17 @@ def build(scratch, gtk):
     return binary
 
 
-def scenario(binary, modules, scratch, *, patched, early):
+def scenario(binary, modules, scratch, *, patched, load, early_read):
     home = Path(tempfile.mkdtemp(dir=scratch))
     config = home / 'config'
-    path = config / 'herda/gtk-layout.json'
-    env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config),
-               GIO_EXTRA_MODULES=str(modules), GTK_GNIST_DEBUG='1', GNIST_TRANSITION_MS='0',
-               LAYOUT_HOST_PATCHED='1' if patched else '0',
-               LAYOUT_HOST_EARLY_MODULES='1' if early else '0')
+    path = config / 'herda/gtk-layout.ini'
+    env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
+               GNIST_TRANSITION_MS='0', LAYOUT_HOST_PATCHED='1' if patched else '0',
+               LAYOUT_HOST_MODULES=load, LAYOUT_HOST_EARLY_READ='1' if early_read else '0')
+    if load != 'absent':
+        env['GIO_EXTRA_MODULES'] = str(modules)
     env.pop('GTK_DISABLE_GNIST_STYLE', None)
-    name = f'{binary.name} patched={patched} early={early}'
+    name = f'{binary.name} patched={patched} modules={load} early-read={early_read}'
 
     if not patched:
         replace_atomically(path, layout_doc('herda-desktop'))
@@ -127,11 +126,24 @@ def scenario(binary, modules, scratch, *, patched, early):
         print(f'ok {name}: unpatched toolkit left alone')
         return
 
-    # The file exists before the application starts: its first window may be
-    # built before the module attaches, and must be re-laid out once it does.
+    # The file exists before the application starts.
     replace_atomically(path, layout_doc('herda-desktop'))
     host = Host(binary, env)
-    assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
+    if load == 'absent':
+        # Only the toolkit's own read: right at first paint, no live changes.
+        assert host.first_window == ('herda-desktop' if early_read else 'native')
+        replace_atomically(path, layout_doc('native'))
+        host.quiet()
+        host.close()
+        print(f'ok {name}')
+        return
+    if early_read:
+        # The toolkit had it right for the first window; attaching agrees.
+        assert host.first_window == 'herda-desktop'
+        host.wait_log('layout=herda-desktop unchanged (attach)')
+    else:
+        # A first window built before attach is re-laid out once it attaches.
+        assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
     assert host.window() == 'herda-desktop', 'a later window reads the published layout'
     host.quiet()
 
@@ -150,40 +162,67 @@ def scenario(binary, modules, scratch, *, patched, early):
     assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
 
     # Malformed, future and unknown documents all mean native.
-    for text in ['{"schema":', layout_doc('herda-desktop', version=2), layout_doc('windows'), '[]']:
+    for text in ['[GtkLayout', layout_doc('herda-desktop', version='2'), layout_doc('windows'),
+                 layout_doc('herda-desktop', schema='org.herda.Other'), '']:
         replace_atomically(path, text)
         assert host.expect('NOTIFY') == 'NOTIFY native', text
         replace_atomically(path, layout_doc('herda-desktop'))
         assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
 
-    # Removing the file is the native layout; so is removing its directory.
+    # Removing the file is native; so is removing its directory, and both
+    # coming back -- directory first, then the file -- is followed live.
     path.unlink()
     assert host.expect('NOTIFY') == 'NOTIFY native'
     replace_atomically(path, layout_doc('herda-desktop'))
     assert host.expect('NOTIFY') == 'NOTIFY herda-desktop'
-    shutil.rmtree(path.parent)
+    shutil.rmtree(config)
     assert host.expect('NOTIFY') == 'NOTIFY native'
+    config.mkdir()
+    host.quiet(0.3)
     path.parent.mkdir()
+    host.quiet(0.3)
     replace_atomically(path, layout_doc('herda-desktop'))
-    assert host.expect('NOTIFY', timeout=TIMEOUT) == 'NOTIFY herda-desktop'
+    assert host.expect('NOTIFY', timeout=1.5) == 'NOTIFY herda-desktop'
 
-    # The D-Bus nudge and a colour change both re-read the file and converge.
-    def signal(*args):
-        subprocess.run(['dbus-send', '--session', '--type=signal', *args], check=True, env=env)
-
-    signal('/org/gnist/Layout1', 'org.gnist.Layout1.Changed', 'uint64:7', 'string:herda-desktop')
-    host.wait_log('layout=herda-desktop unchanged (signal)')
+    # A colour change re-reads the file but leaves an unchanged layout alone.
     css = config / 'gnist/themes/current/gtk.css'
     css.parent.mkdir(parents=True, exist_ok=True)
     css.write_text('window { }\n')
-    signal('/org/gnist/Appearance1', 'org.gnist.Appearance1.Changed', 'uint64:3', f'string:{css}', 'string:dark')
+    subprocess.run(['dbus-send', '--session', '--type=signal', '/org/gnist/Appearance1',
+                    'org.gnist.Appearance1.Changed', 'uint64:3', f'string:{css}', 'string:dark'],
+                   check=True, env=env)
     host.wait_log('layout=herda-desktop unchanged (appearance)')
     host.wait_log('reloaded GTK')
     host.quiet()
-    assert host.window() == 'herda-desktop', 'a colour change leaves the layout alone'
+    assert host.window() == 'herda-desktop'
 
     host.close()
     print(f'ok {name}')
+
+
+def missing_directory(binary, modules, scratch):
+    """Start with no configuration directory at all, then create it."""
+    home = Path(tempfile.mkdtemp(dir=scratch))
+    config = home / 'config'
+    path = config / 'herda/gtk-layout.ini'
+    env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
+               GIO_EXTRA_MODULES=str(modules), LAYOUT_HOST_PATCHED='1', LAYOUT_HOST_MODULES='late',
+               LAYOUT_HOST_EARLY_READ='1')
+    host = Host(binary, env)
+    assert host.first_window == 'native'
+    host.wait_log('layout=native unchanged (attach)')
+    config.mkdir()
+    host.quiet(0.3)
+    path.parent.mkdir()
+    host.quiet(0.3)
+    # Faster than GLib's own four-second poll for missing directories: the
+    # monitor moved down to the new directory.
+    replace_atomically(path, layout_doc('herda-desktop'))
+    assert host.expect('NOTIFY', timeout=1.5) == 'NOTIFY herda-desktop'
+    path.unlink()
+    assert host.expect('NOTIFY', timeout=1.5) == 'NOTIFY native'
+    host.close()
+    print(f'ok {binary.name} missing configuration directory')
 
 
 def main():
@@ -206,9 +245,12 @@ def main():
         shutil.copy2(target, modules / 'libgnist_gio.so')
         for gtk in [4, 3]:
             binary = build(scratch, gtk)
-            for patched in [True, False]:
-                for early in [False, True]:
-                    scenario(binary, modules, scratch, patched=patched, early=early)
+            missing_directory(binary, modules, scratch)
+            for load in ['late', 'early', 'thread', 'absent']:
+                for early_read in [False, True]:
+                    scenario(binary, modules, scratch, patched=True, load=load, early_read=early_read)
+            for load in ['late', 'early']:
+                scenario(binary, modules, scratch, patched=False, load=load, early_read=False)
 
 
 if __name__ == '__main__':

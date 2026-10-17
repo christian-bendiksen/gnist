@@ -13,4 +13,3 @@ crate-type = ["cdylib"]
 glib = "0.20"
 gio  = "0.20"
 libc = "0.2"
-serde_json = "1"

@@ -4,7 +4,7 @@ use crate::{config::Mode, layout, ox_log, style};
 
 struct Subscription {
     connection: gio::DBusConnection,
-    ids: Vec<gio::SignalSubscriptionId>,
+    id: gio::SignalSubscriptionId,
 }
 
 thread_local! {
@@ -18,7 +18,7 @@ pub fn subscribe() {
 
     gio::bus_get(gio::BusType::Session, gio::Cancellable::NONE, |result| match result {
         Ok(connection) => {
-            let appearance = connection.signal_subscribe(
+            let id = connection.signal_subscribe(
                 None::<&str>,
                 Some("org.gnist.Appearance1"),
                 Some("Changed"),
@@ -29,24 +29,11 @@ pub fn subscribe() {
                     handle_changed(parameters);
                 },
             );
-            // The layout signal only says "look again": the file stays the
-            // authority, so a missed or reordered signal still converges.
-            let layout = connection.signal_subscribe(
-                None::<&str>,
-                Some("org.gnist.Layout1"),
-                Some("Changed"),
-                Some("/org/gnist/Layout1"),
-                None::<&str>,
-                gio::DBusSignalFlags::NONE,
-                |_connection, _sender, _path, _interface, _signal, _parameters| {
-                    layout::refresh("signal");
-                },
-            );
 
             SUBSCRIPTION.with(|state| {
-                state.replace(Some(Subscription { connection, ids: vec![appearance, layout] }));
+                state.replace(Some(Subscription { connection, id }));
             });
-            ox_log!("subscribed to D-Bus signals");
+            ox_log!("subscribed to D-Bus signal");
         }
         Err(error) => ox_log!("D-Bus connect failed: {error}"),
     });
@@ -55,9 +42,7 @@ pub fn subscribe() {
 pub fn unsubscribe() {
     SUBSCRIPTION.with(|state| {
         if let Some(subscription) = state.borrow_mut().take() {
-            for id in subscription.ids {
-                subscription.connection.signal_unsubscribe(id);
-            }
+            subscription.connection.signal_unsubscribe(subscription.id);
         }
     });
 }
@@ -72,7 +57,7 @@ fn handle_changed(parameters: &glib::Variant) {
     ox_log!("signal revision={revision} path={css_path} mode={mode}");
 
     style::update_and_reload(&css_path, mode);
-    // A theme change is also a chance to recover a layout change whose file
-    // event or signal this process missed.
+    // The layout file is the authority; a theme change is a chance to recover
+    // a change whose file event this process missed.
     layout::refresh("appearance");
 }
