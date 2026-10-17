@@ -77,6 +77,10 @@ class Host:
         self.process.stdin.write('window\n')
         return self.expect('WINDOW').split()[2]
 
+    def opacity(self):
+        self.process.stdin.write('opacity\n')
+        return [float(value) for value in self.expect('OPACITY').split()[1:]]
+
     def wait_log(self, needle, timeout=TIMEOUT):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -225,6 +229,41 @@ def missing_directory(binary, modules, scratch):
     print(f'ok {binary.name} missing configuration directory')
 
 
+def crossfade(binary, modules, scratch):
+    """A colour change fades the title bar with the content, then restores both."""
+    home = Path(tempfile.mkdtemp(dir=scratch))
+    config = home / 'config'
+    env = dict(os.environ, HOME=str(home), XDG_CONFIG_HOME=str(config), GTK_GNIST_DEBUG='1',
+               GIO_EXTRA_MODULES=str(modules), GNIST_TRANSITION_MS='1200', LAYOUT_HOST_MODULES='late')
+    css = config / 'gnist/themes/current/gtk.css'
+    css.parent.mkdir(parents=True)
+    css.write_text('window { }\n')
+    host = Host(binary, env)
+    host.wait_log('subscribed to D-Bus')
+    before = host.opacity()
+    assert len(before) >= 2 and all(value == 1.0 for value in before), before
+    subprocess.run(['dbus-send', '--session', '--type=signal', '/org/gnist/Appearance1',
+                    'org.gnist.Appearance1.Changed', 'uint64:9', f'string:{css}', 'string:dark'],
+                   check=True, env=env)
+    host.wait_log('fade started')
+    time.sleep(0.3)
+    during = host.opacity()
+    assert len(during) == len(before) and all(value < 0.95 for value in during), during
+    time.sleep(1.5)
+    after = host.opacity()
+    assert all(value == 1.0 for value in after), after
+
+    # Reduced motion: the same change is instant.
+    host.process.stdin.write('reduce-motion\n')
+    subprocess.run(['dbus-send', '--session', '--type=signal', '/org/gnist/Appearance1',
+                    'org.gnist.Appearance1.Changed', 'uint64:10', f'string:{css}', 'string:light'],
+                   check=True, env=env)
+    host.wait_log('theme notify complete: reduced-motion')
+    assert all(value == 1.0 for value in host.opacity())
+    host.close()
+    print(f'ok {binary.name} crossfade: {len(before)} children faded together and restored; reduced motion instant')
+
+
 def main():
     for tool in ['cc', 'pkg-config', 'xvfb-run', 'dbus-run-session', 'dbus-send', 'cargo']:
         if not shutil.which(tool):
@@ -245,6 +284,7 @@ def main():
         shutil.copy2(target, modules / 'libgnist_gio.so')
         for gtk in [4, 3]:
             binary = build(scratch, gtk)
+            crossfade(binary, modules, scratch)
             missing_directory(binary, modules, scratch)
             for load in ['late', 'early', 'thread', 'absent']:
                 for early_read in [False, True]:

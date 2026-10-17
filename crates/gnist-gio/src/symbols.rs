@@ -16,11 +16,13 @@ pub type ObjectRef = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub type ObjectUnref = unsafe extern "C" fn(*mut c_void);
 pub type ObjectNotify = unsafe extern "C" fn(*mut c_void, *const c_char);
 pub type WidgetSetOpacity = unsafe extern "C" fn(*mut c_void, f64);
-pub type WindowGetChild = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+pub type WidgetGetChild = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
+pub type ContainerCallback = unsafe extern "C" fn(*mut c_void, *mut c_void);
+pub type ContainerForall = unsafe extern "C" fn(*mut c_void, ContainerCallback, *mut c_void);
 pub type WindowListToplevels = unsafe extern "C" fn() -> *mut GList;
 pub type ListFree = unsafe extern "C" fn(*mut c_void);
 pub type DisplayManagerGet = unsafe extern "C" fn() -> *mut c_void;
-pub type DisplayManagerListDisplays = unsafe extern "C" fn(*mut c_void) -> *mut GList;
+pub type DisplayManagerListDisplays = unsafe extern "C" fn(*mut c_void) -> *mut glib::ffi::GSList;
 pub type ObjectGetter = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 pub type SignalConnectData = unsafe extern "C" fn(
     *mut c_void,
@@ -57,12 +59,12 @@ pub struct CoreSyms {
     pub g_object_unref: ObjectUnref,
     pub g_object_notify: Option<ObjectNotify>,
     pub gtk_widget_set_opacity: Option<WidgetSetOpacity>,
-    pub gtk_window_get_child: Option<WindowGetChild>,
-    pub gtk_bin_get_child: Option<WindowGetChild>,
+    pub gtk_widget_get_first_child: Option<WidgetGetChild>,
+    pub gtk_widget_get_next_sibling: Option<WidgetGetChild>,
+    pub gtk_container_forall: Option<ContainerForall>,
     pub gtk_window_list_toplevels: Option<WindowListToplevels>,
     pub g_list_free: Option<ListFree>,
     pub gdk_display_manager_get: Option<DisplayManagerGet>,
-    // A GSList, whose leading fields match GList's `data` and `next`.
     pub gdk_display_manager_list_displays: Option<DisplayManagerListDisplays>,
     pub gtk_settings_get_for_display: Option<ObjectGetter>,
     pub gdk_display_get_default_screen: Option<ObjectGetter>,
@@ -97,8 +99,9 @@ pub fn core() -> Option<&'static CoreSyms> {
             g_object_unref: symbol(b"g_object_unref\0")?,
             g_object_notify: symbol(b"g_object_notify\0"),
             gtk_widget_set_opacity: symbol(b"gtk_widget_set_opacity\0"),
-            gtk_window_get_child: symbol(b"gtk_window_get_child\0"),
-            gtk_bin_get_child: symbol(b"gtk_bin_get_child\0"),
+            gtk_widget_get_first_child: symbol(b"gtk_widget_get_first_child\0"),
+            gtk_widget_get_next_sibling: symbol(b"gtk_widget_get_next_sibling\0"),
+            gtk_container_forall: symbol(b"gtk_container_forall\0"),
             gtk_window_list_toplevels: symbol(b"gtk_window_list_toplevels\0"),
             g_list_free: symbol(b"g_list_free\0"),
             gdk_display_manager_get: symbol(b"gdk_display_manager_get\0"),

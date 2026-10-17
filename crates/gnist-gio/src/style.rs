@@ -162,6 +162,10 @@ pub fn update_and_reload(signal_path: &str, mode: Mode) {
         reload_instant(&reload, mode, "instant");
         return;
     }
+    if !animations_enabled() {
+        reload_instant(&reload, mode, "reduced-motion");
+        return;
+    }
 
     let Some(set_opacity) = symbols::core().and_then(|symbols| symbols.gtk_widget_set_opacity) else {
         reload_instant(&reload, mode, "no-opacity-symbol");
@@ -247,6 +251,22 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
 
         Some(style.snapshot())
     })
+}
+
+/// GtkSettings:gtk-enable-animations, which reduced motion turns off.
+fn animations_enabled() -> bool {
+    use glib::prelude::*;
+
+    let Some(get_settings) = symbols::core().and_then(|symbols| symbols.gtk_settings_get_default) else {
+        return true;
+    };
+    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else { return true };
+    let settings: glib::Object =
+        unsafe { glib::translate::from_glib_none(settings.as_ptr().cast::<glib::gobject_ffi::GObject>()) };
+    settings
+        .find_property("gtk-enable-animations")
+        .filter(|pspec| pspec.value_type() == glib::Type::BOOL)
+        .is_none_or(|_| settings.property::<bool>("gtk-enable-animations"))
 }
 
 fn fade_active() -> bool {
@@ -424,24 +444,55 @@ fn tick_fade() -> glib::ControlFlow {
 
 fn collect_fade_targets(gtk: GtkApi) -> Vec<OwnedGObject> {
     let Some(symbols) = symbols::core() else { return Vec::new() };
-    let get_child = match gtk {
-        GtkApi::Gtk4 => symbols.gtk_window_get_child,
-        GtkApi::Gtk3 => symbols.gtk_bin_get_child,
-    };
-
     let Some(windows) = collect_windows(symbols) else {
         return Vec::new();
     };
 
+    // Fade every direct child of a toplevel, not only its content: the title
+    // bar, and the toolkit's own Herda title row, change colour too. A
+    // toplevel without children fades as a whole.
     windows
         .iter()
-        .filter_map(|window| {
-            let target = get_child
-                .and_then(|get_child| GObjectPtr::from_raw(unsafe { get_child(window.as_ptr()) }))
-                .unwrap_or(window);
-            OwnedGObject::retain(target)
+        .flat_map(|window| {
+            let children = window_children(symbols, gtk, window);
+            if children.is_empty() { vec![window] } else { children }
         })
+        .filter_map(OwnedGObject::retain)
         .collect()
+}
+
+fn window_children(symbols: &symbols::CoreSyms, gtk: GtkApi, window: GObjectPtr) -> Vec<GObjectPtr> {
+    let mut children = Vec::new();
+    match gtk {
+        GtkApi::Gtk4 => {
+            let (Some(first), Some(next)) =
+                (symbols.gtk_widget_get_first_child, symbols.gtk_widget_get_next_sibling)
+            else {
+                return children;
+            };
+            let mut child = GObjectPtr::from_raw(unsafe { first(window.as_ptr()) });
+            while let Some(widget) = child {
+                children.push(widget);
+                child = GObjectPtr::from_raw(unsafe { next(widget.as_ptr()) });
+            }
+        }
+        GtkApi::Gtk3 => {
+            // forall, unlike foreach, includes internal children such as the
+            // window's title bar.
+            if let Some(forall) = symbols.gtk_container_forall {
+                unsafe { forall(window.as_ptr(), collect_child, (&raw mut children).cast()) };
+            }
+        }
+    }
+    children
+}
+
+/// # Safety
+/// `data` is the `Vec<GObjectPtr>` passed to `gtk_container_forall` by
+/// `window_children`, alive for the synchronous call.
+unsafe extern "C" fn collect_child(widget: *mut c_void, data: *mut c_void) {
+    let children = unsafe { &mut *data.cast::<Vec<GObjectPtr>>() };
+    children.extend(GObjectPtr::from_raw(widget));
 }
 
 struct GListOwned {

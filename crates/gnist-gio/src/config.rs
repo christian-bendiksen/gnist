@@ -162,7 +162,7 @@ pub fn css_path_loadable(path: impl AsRef<Path>) -> bool {
     !path.as_os_str().is_empty() && path.is_file()
 }
 
-pub fn config_home() -> PathBuf {
+fn config_home() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
 
     // Flatpak may redirect XDG_CONFIG_HOME into its sandbox. The configured

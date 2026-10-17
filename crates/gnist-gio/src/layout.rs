@@ -82,8 +82,11 @@ impl Layout {
     }
 }
 
+/// GLib's user configuration directory, exactly as the toolkit's startup
+/// read resolves it. Unlike the CSS path this has no Flatpak exception: both
+/// readers must name the same file in every sandbox.
 pub fn config_path() -> PathBuf {
-    crate::config::config_home().join(DIRECTORY).join(FILE_NAME)
+    glib::user_config_dir().join(DIRECTORY).join(FILE_NAME)
 }
 
 struct Watch {
@@ -243,12 +246,12 @@ fn all_settings(gtk: GtkApi) -> Vec<glib::Object> {
         let head = list_displays(manager.as_ptr().cast());
         let mut node = head;
         while let Some(entry) = node.as_ref() {
-            if let Some(object) = settings_for_display(symbols, gtk, entry.data) {
+            if let Some(object) = settings_for_display(symbols, gtk, entry.data.cast()) {
                 settings.push(object);
             }
             node = entry.next;
         }
-        glib::ffi::g_slist_free(head.cast());
+        glib::ffi::g_slist_free(head);
     }
     settings
 }
@@ -360,25 +363,46 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
-    /// The fixture cases shared with the patched toolkit's reader:
-    /// `GTK_LAYOUT_FIXTURES`, or Herda's tree beside this repository.
+    /// The fixture cases shared with the patched toolkit's reader. An explicit
+    /// `GTK_LAYOUT_FIXTURES` must hold them; Herda's tree beside this
+    /// repository is only used when present.
     #[test]
     fn shared_fixtures() {
-        let directory = std::env::var_os("GTK_LAYOUT_FIXTURES").map(PathBuf::from).unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../herda/distro/patches/gtk-layout-fixtures")
-        });
-        let Ok(manifest) = std::fs::read_to_string(directory.join("expected.tsv")) else {
-            eprintln!("no shared fixtures at {}; skipped", directory.display());
-            return;
+        let manifest_in = |directory: &Path| std::fs::read_to_string(directory.join("expected.tsv"));
+        let (directory, manifest) = match std::env::var_os("GTK_LAYOUT_FIXTURES") {
+            Some(directory) => {
+                let directory = PathBuf::from(directory);
+                let manifest = manifest_in(&directory)
+                    .unwrap_or_else(|error| panic!("GTK_LAYOUT_FIXTURES={}: {error}", directory.display()));
+                (directory, manifest)
+            }
+            None => {
+                let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../../herda/distro/patches/gtk-layout-fixtures");
+                let Ok(manifest) = manifest_in(&directory) else {
+                    eprintln!("no shared fixtures at {}; set GTK_LAYOUT_FIXTURES to require them", directory.display());
+                    return;
+                };
+                (directory, manifest)
+            }
         };
-        let mut cases = 0;
+        // Every case listed exists, and every file present is a listed case.
+        let mut listed = std::collections::BTreeSet::new();
         for line in manifest.lines().map(str::trim).filter(|line| !line.is_empty() && !line.starts_with('#')) {
             let (name, expected) = line.split_once(char::is_whitespace).expect("NAME EXPECTED");
             let expected = Layout::from_nick(expected.trim()).expect("expected layout");
-            assert_eq!(Layout::read(&directory.join(name)), expected, "{name}");
-            cases += 1;
+            let path = directory.join(name);
+            assert!(path.is_file(), "listed fixture {name} is missing");
+            assert_eq!(Layout::read(&path), expected, "{name}");
+            assert!(listed.insert(name.to_owned()), "{name} is listed twice");
         }
-        assert!(cases > 0);
+        let present: std::collections::BTreeSet<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "expected.tsv")
+            .collect();
+        assert_eq!(present, listed, "fixtures present and listed differ");
+        assert!(!listed.is_empty());
     }
 
     // Stand-in for a patched GtkSettings.
@@ -450,6 +474,15 @@ mod tests {
     fn unpatched_toolkit_is_left_alone() {
         let settings = glib::Object::new::<glib::Object>();
         assert!(matches!(set_layout(&settings, Layout::HerdaDesktop), Publish::Unsupported(_)));
+    }
+
+    #[test]
+    fn layout_path_is_glibs_user_config_dir() {
+        // The toolkit reads g_get_user_config_dir()/herda/gtk-layout.ini.
+        let expected = unsafe {
+            std::ffi::CStr::from_ptr(glib::ffi::g_get_user_config_dir()).to_str().unwrap().to_owned()
+        };
+        assert_eq!(config_path(), Path::new(&expected).join("herda/gtk-layout.ini"));
     }
 
     #[test]

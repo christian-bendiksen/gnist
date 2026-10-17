@@ -12,7 +12,10 @@
  *   NOTIFY <layout>          GtkSettings:gtk-herda-layout changed
  *   WINDOW <n> <layout>      a window built now would read this layout
  *
- * Commands on stdin: "window" builds a window, "quit" (or EOF) exits.
+ *   OPACITY <o>...           the first window's direct children's opacities
+ *
+ * Commands on stdin: "window" builds a window, "opacity" reports,
+ * "reduce-motion" turns animations off, "quit" (or EOF) exits.
  */
 #include <gtk/gtk.h>
 #include <stdio.h>
@@ -23,6 +26,7 @@
 static GMainLoop *loop;
 static int windows;
 static char *initial_layout;
+static GtkWidget *first_window;
 
 /* The toolkit's rules: anything but a complete version 1 group is native. */
 static char *
@@ -75,16 +79,41 @@ build_window (void)
   char *layout = current_layout ();
 #if GTK_MAJOR_VERSION >= 4
   GtkWidget *window = gtk_window_new ();
+  gtk_window_set_titlebar (GTK_WINDOW (window), gtk_header_bar_new ());
   gtk_window_set_child (GTK_WINDOW (window), gtk_label_new ("layout host"));
   gtk_window_present (GTK_WINDOW (window));
 #else
   GtkWidget *window = gtk_window_new (GTK_WINDOW_TOPLEVEL);
+  gtk_window_set_titlebar (GTK_WINDOW (window), gtk_header_bar_new ());
   gtk_container_add (GTK_CONTAINER (window), gtk_label_new ("layout host"));
   gtk_widget_show_all (window);
 #endif
+  if (!first_window)
+    first_window = window;
   printf ("WINDOW %d %s\n", ++windows, layout);
   fflush (stdout);
   g_free (layout);
+}
+
+static void
+print_opacity (GtkWidget *child, gpointer data)
+{
+  printf (" %.3f", gtk_widget_get_opacity (child));
+}
+
+static void
+report_opacity (void)
+{
+  printf ("OPACITY");
+#if GTK_MAJOR_VERSION >= 4
+  for (GtkWidget *child = gtk_widget_get_first_child (first_window); child;
+       child = gtk_widget_get_next_sibling (child))
+    print_opacity (child, NULL);
+#else
+  gtk_container_forall (GTK_CONTAINER (first_window), print_opacity, NULL);
+#endif
+  printf ("\n");
+  fflush (stdout);
 }
 
 static gboolean
@@ -101,6 +130,10 @@ on_command (GIOChannel *channel, GIOCondition condition, gpointer data)
   g_strstrip (line);
   if (strcmp (line, "window") == 0)
     build_window ();
+  else if (strcmp (line, "reduce-motion") == 0)
+    g_object_set (gtk_settings_get_default (), "gtk-enable-animations", FALSE, NULL);
+  else if (strcmp (line, "opacity") == 0)
+    report_opacity ();
   else if (strcmp (line, "quit") == 0)
     g_main_loop_quit (loop);
   g_free (line);
