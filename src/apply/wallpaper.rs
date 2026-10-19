@@ -74,6 +74,31 @@ pub fn run(ctx: &Ctx, theme: &Theme) -> Result<()> {
     Ok(())
 }
 
+/// Show the wallpaper for a theme that was just set.
+///
+/// The background link names `current/backgrounds/<picture>`, so once the new
+/// theme is published it already resolves into the new theme's picture of the
+/// same name. A dark/light pair that ships the same pictures (Kvarts and
+/// Kvarts Light both lead with Facet) must keep the one the person was looking
+/// at; [`run`] advanced from it instead, and Kvarts Light came up on the next
+/// picture in its list, Herda Drawn. So: the current picture when the theme has
+/// it, else the theme's first. Cycling stays [`run`]'s, for `gnist wallpaper`.
+pub fn show_for_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
+    let cfg = WallpaperConfig::load(&theme.root, &theme.vars);
+    let candidates = collect_candidates(ctx, theme);
+
+    if candidates.is_empty() {
+        notify(&format!("No wallpaper found for theme '{}'", theme.name));
+        return Ok(());
+    }
+
+    let current = canonical_str(&ctx.background_link);
+    let chosen = pick_for_theme(&candidates, current.as_deref());
+    change_wallpaper(chosen, &cfg)?;
+    util::symlink_force(chosen, &ctx.background_link)?;
+    Ok(())
+}
+
 /// Select an exact image independently of the active theme's wallpaper cycle.
 pub fn set(ctx: &Ctx, image: &Path) -> Result<()> {
     let image = resolve_image(image)?;
@@ -146,6 +171,18 @@ fn pick_next<'a>(candidates: &'a [Candidate], current: Option<&str>) -> &'a Path
     &candidates[idx].path
 }
 
+fn pick_for_theme<'a>(candidates: &'a [Candidate], current: Option<&str>) -> &'a PathBuf {
+    let idx = current
+        .and_then(|cur| {
+            candidates
+                .iter()
+                .position(|c| c.canonical.as_deref() == Some(cur))
+        })
+        .unwrap_or(0);
+
+    &candidates[idx].path
+}
+
 fn change_wallpaper(path: &Path, cfg: &WallpaperConfig) -> Result<()> {
     wait_for_awww()?;
 
@@ -196,8 +233,48 @@ fn notify(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_image;
+    use super::{Candidate, pick_for_theme, pick_next, resolve_image};
     use std::fs;
+    use std::path::PathBuf;
+
+    fn candidates(names: &[&str]) -> Vec<Candidate> {
+        names
+            .iter()
+            .map(|name| Candidate {
+                path: PathBuf::from(format!("current/backgrounds/{name}")),
+                canonical: Some(format!("/themes/light/backgrounds/{name}")),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn setting_a_theme_keeps_a_picture_it_shares_and_never_advances() {
+        // Kvarts -> Kvarts Light: the link already resolves to Light's Facet.
+        let list = candidates(&["0-kvarts-facet.jpg", "1-herda-drawn.jpg"]);
+        let facet = Some("/themes/light/backgrounds/0-kvarts-facet.jpg");
+        assert_eq!(
+            pick_for_theme(&list, facet),
+            &PathBuf::from("current/backgrounds/0-kvarts-facet.jpg")
+        );
+        // What `gnist wallpaper` does from the same place: the next one.
+        assert_eq!(
+            pick_next(&list, facet),
+            &PathBuf::from("current/backgrounds/1-herda-drawn.jpg")
+        );
+        // A picture the theme doesn't have (a dangling link, another theme's
+        // file, nothing yet): the theme's first.
+        for current in [None, Some("/themes/dark/backgrounds/x.jpg")] {
+            assert_eq!(
+                pick_for_theme(&list, current),
+                &PathBuf::from("current/backgrounds/0-kvarts-facet.jpg")
+            );
+        }
+        // A later picture the person chose in the old theme stays too.
+        assert_eq!(
+            pick_for_theme(&list, Some("/themes/light/backgrounds/1-herda-drawn.jpg")),
+            &PathBuf::from("current/backgrounds/1-herda-drawn.jpg")
+        );
+    }
 
     #[test]
     fn resolve_image_canonicalizes_regular_files() {
