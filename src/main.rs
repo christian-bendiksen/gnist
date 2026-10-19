@@ -285,7 +285,7 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     }
 
     if !flags.skip_wallpaper
-        && let Err(e) = apply::wallpaper::run(ctx, theme)
+        && let Err(e) = apply::wallpaper::show_for_theme(ctx, theme)
     {
         eprintln!(
             "{}",
