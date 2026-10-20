@@ -1,3 +1,4 @@
+mod accent;
 mod border;
 pub mod colors;
 mod vars;
@@ -10,7 +11,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use vars::build_vars_from_colors;
+use vars::build_vars_with_overrides;
 
 #[derive(Clone, Debug)]
 pub struct Theme {
@@ -20,14 +21,21 @@ pub struct Theme {
     pub is_light: bool,
     pub icon_theme: Option<String>,
     pub backgrounds_dir: Option<PathBuf>,
+    pub accent_choices: Vec<serde_json::Value>,
+    pub accent: Option<String>,
 }
 
 impl Theme {
     pub fn load(ctx: &Ctx, name: &str) -> Result<Self> {
-        Self::load_from_roots(&ctx.source_roots, name)
+        Self::load_selected(&ctx.source_roots, name, Some(&ctx.config_dir.join("accent.json")))
     }
 
+    #[cfg(test)]
     fn load_from_roots(source_roots: &[PathBuf], name: &str) -> Result<Self> {
+        Self::load_selected(source_roots, name, None)
+    }
+
+    fn load_selected(source_roots: &[PathBuf], name: &str, selection: Option<&Path>) -> Result<Self> {
         let first = source_roots
             .first()
             .map(|root| root.join("data").join(name))
@@ -40,10 +48,14 @@ impl Theme {
             bail!("theme not found: {}", first.display());
         };
 
-        Self::load_root(root, name)
+        Self::load_root_selected(root, name, selection)
     }
 
-    pub(crate) fn load_root(root: PathBuf, name: &str) -> Result<Self> {
+    pub(crate) fn load_root(ctx: &Ctx, root: PathBuf, name: &str) -> Result<Self> {
+        Self::load_root_selected(root, name, Some(&ctx.config_dir.join("accent.json")))
+    }
+
+    fn load_root_selected(root: PathBuf, name: &str, selection: Option<&Path>) -> Result<Self> {
         if !root.is_dir() {
             bail!("theme not found: {}", root.display());
         }
@@ -56,12 +68,13 @@ impl Theme {
             );
         }
 
-        let mut vars = build_vars_from_colors(&colors_file)
+        let is_light = root.join("light.mode").is_file();
+        let accents = accent::load(&root, is_light, selection)?;
+        let mut vars = build_vars_with_overrides(&colors_file, &accents.roles)
             .with_context(|| format!("build vars for theme '{name}'"))?;
 
         let borders = border::resolve(&root);
-        let active = borders
-            .active
+        let active = accents.roles.get("border_active").cloned().or(borders.active)
             .or_else(|| vars.get("accent").and_then(value_string));
         let inactive = borders
             .inactive
@@ -75,7 +88,6 @@ impl Theme {
         }
 
         let bg_dir = root.join("backgrounds");
-        let is_light = root.join("light.mode").is_file();
         let wallpapers: Vec<String> = image_files(&bg_dir)
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -87,6 +99,8 @@ impl Theme {
             is_light,
             icon_theme: read_trimmed(&root.join("icons.theme"))?,
             backgrounds_dir: bg_dir.is_dir().then_some(bg_dir),
+            accent_choices: accents.choices,
+            accent: accents.selected,
             root,
             vars,
         })
