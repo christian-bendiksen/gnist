@@ -32,6 +32,7 @@ pub fn run(ctx: &Ctx, requested: Option<&str>) -> Result<()> {
                     .collect();
                 json!({"id": name, "current": current.trim() == name,
                     "light": theme.is_light, "colors": colors, "icon_theme": theme.icon_theme,
+                    "accentChoices": theme.accent_choices, "accent": theme.accent,
                     "wallpapers": theme.vars.get("wallpapers").map(|value| match value {
                         crate::render::value::Value::List(items) => items.iter().map(|item| item.display()).collect::<Vec<_>>(),
                         _ => Vec::new(),
