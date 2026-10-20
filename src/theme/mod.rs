@@ -27,7 +27,11 @@ pub struct Theme {
 
 impl Theme {
     pub fn load(ctx: &Ctx, name: &str) -> Result<Self> {
-        Self::load_selected(&ctx.source_roots, name, Some(&ctx.config_dir.join("accent.json")))
+        Self::load_selected(
+            &ctx.source_roots,
+            name,
+            Some(&ctx.config_dir.join("accent.json")),
+        )
     }
 
     #[cfg(test)]
@@ -35,7 +39,11 @@ impl Theme {
         Self::load_selected(source_roots, name, None)
     }
 
-    fn load_selected(source_roots: &[PathBuf], name: &str, selection: Option<&Path>) -> Result<Self> {
+    fn load_selected(
+        source_roots: &[PathBuf],
+        name: &str,
+        selection: Option<&Path>,
+    ) -> Result<Self> {
         let first = source_roots
             .first()
             .map(|root| root.join("data").join(name))
@@ -74,7 +82,11 @@ impl Theme {
             .with_context(|| format!("build vars for theme '{name}'"))?;
 
         let borders = border::resolve(&root);
-        let active = accents.roles.get("border_active").cloned().or(borders.active)
+        let active = accents
+            .roles
+            .get("border_active")
+            .cloned()
+            .or(borders.active)
             .or_else(|| vars.get("accent").and_then(value_string));
         let inactive = borders
             .inactive
