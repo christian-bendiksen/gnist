@@ -1,6 +1,8 @@
 mod config;
 mod dbus;
 mod layout;
+mod snap_layouts;
+mod snap_wayland;
 mod style;
 mod symbols;
 
@@ -65,6 +67,7 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
 /// ignored and is never dereferenced.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn g_io_module_unload(_module: *mut c_void) {
+    snap_layouts::detach();
     dbus::unsubscribe();
     layout::detach();
     style::cleanup();
@@ -109,6 +112,7 @@ fn attach_or_retry(attempt: u32) {
 
     style::attach(gtk);
     layout::attach(gtk);
+    snap_layouts::attach(gtk);
     dbus::subscribe();
 }
 

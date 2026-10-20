@@ -139,7 +139,7 @@ pub fn detected_gtk() -> Option<(u32, Option<GtkApi>)> {
 /// # Safety
 /// `name` must end with a NUL byte. `F` must exactly match the exported
 /// function's ABI and signature.
-unsafe fn symbol<F: Copy>(name: &[u8]) -> Option<F> {
+pub(crate) unsafe fn symbol<F: Copy>(name: &[u8]) -> Option<F> {
     debug_assert_eq!(std::mem::size_of::<F>(), std::mem::size_of::<*mut c_void>());
 
     let pointer = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr().cast()) };
