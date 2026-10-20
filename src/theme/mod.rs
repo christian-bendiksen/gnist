@@ -51,8 +51,8 @@ impl Theme {
         Self::load_root_selected(root, name, selection)
     }
 
-    pub(crate) fn load_root(root: PathBuf, name: &str) -> Result<Self> {
-        Self::load_root_selected(root, name, None)
+    pub(crate) fn load_root(ctx: &Ctx, root: PathBuf, name: &str) -> Result<Self> {
+        Self::load_root_selected(root, name, Some(&ctx.config_dir.join("accent.json")))
     }
 
     fn load_root_selected(root: PathBuf, name: &str, selection: Option<&Path>) -> Result<Self> {
