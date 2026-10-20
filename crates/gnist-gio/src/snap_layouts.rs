@@ -81,6 +81,7 @@ pub fn attach(gtk: GtkApi) {
             displays: Vec::new(),
         })
     });
+    crate::ox_log!("snap layouts attached {gtk}; scanning window controls");
     queue_scan();
 }
 pub fn detach() {
@@ -199,11 +200,13 @@ unsafe fn is_maximize(widget: Ptr, gtk: GtkApi) -> bool {
     };
     let mut ancestor = unsafe { parent(widget) };
     let mut header = false;
+    let mut herda_row = false;
+    let mut window_owned = false;
     while !ancestor.is_null() {
-        if unsafe { has_class(ancestor, gtk, c"herda-titlebar".as_ptr()) } {
-            return false;
-        }
+        herda_row |= unsafe { has_class(ancestor, gtk, c"herda-titlebar".as_ptr()) };
         let object: glib::Object = unsafe { from_glib_none(ancestor.cast()) };
+        window_owned |= is_type(&object, "GtkWindow")
+            && unsafe { has_class(ancestor, gtk, c"herda-layout".as_ptr()) };
         header |= is_type(
             &object,
             match gtk {
@@ -213,7 +216,17 @@ unsafe fn is_maximize(widget: Ptr, gtk: GtkApi) -> bool {
         );
         ancestor = unsafe { parent(ancestor) };
     }
-    header
+    eligible_header(gtk, header, herda_row, window_owned)
+}
+fn eligible_header(gtk: GtkApi, header: bool, herda_row: bool, window_owned: bool) -> bool {
+    // Patched GTK owns a .herda-titlebar inside its .herda-layout window.
+    // The separate decoration helper uses the row class too, but its undecorated
+    // window has no .herda-layout. GTK3's own row is a Box, not a HeaderBar.
+    if herda_row {
+        window_owned && (header || gtk == GtkApi::Gtk3)
+    } else {
+        header
+    }
 }
 fn connection(widget: Ptr) -> Option<Rc<Connection>> {
     unsafe {
@@ -278,6 +291,7 @@ impl Hover {
     }
     fn enter(self: &Rc<Self>) {
         self.leave();
+        crate::ox_log!("snap layouts maximize enter; waiting 500 ms");
         let weak = Rc::downgrade(self);
         let timer = glib::timeout_add_local_once(Duration::from_millis(500), move || {
             let Some(hover) = weak.upgrade() else {
@@ -300,6 +314,8 @@ impl Hover {
             if let Some((surface, rect)) = unsafe { bounds(widget.as_ptr().cast(), hover.gtk) } {
                 wire.show(surface, rect);
                 hover.shown.set(true);
+            } else {
+                crate::ox_log!("snap layouts rest skipped: control bounds unavailable");
             }
         });
         *self.timer.borrow_mut() = Some(timer);
@@ -372,6 +388,7 @@ fn attach_button(widget: &glib::Object, gtk: GtkApi) {
         // GTK3 controllers require a retained reference. Also marks GTK4 buttons
         // so repeated maps never attach a second motion controller.
         widget.set_data(MARKER, controller);
+        crate::ox_log!("snap layouts {gtk} maximize controller attached");
     }
 }
 #[repr(C)]
@@ -493,6 +510,18 @@ unsafe fn bounds(widget: Ptr, gtk: GtkApi) -> Option<(Ptr, [i32; 4])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn toolkit_owned_rows_are_not_decoration_helper_rows() {
+        for gtk in [GtkApi::Gtk3, GtkApi::Gtk4] {
+            assert!(eligible_header(gtk, true, false, false)); // stock CSD
+            assert!(eligible_header(gtk, true, true, true)); // toolkit-owned CSD
+            assert!(!eligible_header(gtk, true, true, false)); // helper's row
+            assert!(!eligible_header(gtk, false, false, true)); // unrelated button
+        }
+        assert!(eligible_header(GtkApi::Gtk3, false, true, true)); // patched Box
+        assert!(!eligible_header(GtkApi::Gtk4, false, true, true)); // needs controls
+    }
+
     #[test]
     fn surface_bounds_enclose_fractional_edges_without_buffer_scaling() {
         assert_eq!(enclosing(10.25, 4.75, 30.5, 28.5), Some([10, 4, 31, 30]));

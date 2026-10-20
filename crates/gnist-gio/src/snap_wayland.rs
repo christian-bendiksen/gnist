@@ -127,6 +127,7 @@ impl Connection {
             return None;
         }
         unsafe { flush(display) };
+        crate::ox_log!("snap layouts registry requested on GDK connection");
         Some(connection)
     }
     pub fn available(&self) -> bool {
@@ -136,6 +137,7 @@ impl Connection {
         if !self.available() || surface.is_null() {
             return;
         }
+        crate::ox_log!("snap layouts show rect={rect:?}");
         let [x, y, width, height] = rect;
         let mut args = [
             Argument { o: surface },
@@ -205,6 +207,9 @@ unsafe extern "C" fn global(
     };
     connection.proxy.set(proxy);
     connection.name.set(name);
+    if connection.available() {
+        crate::ox_log!("snap layouts global bound version=1");
+    }
     crate::snap_layouts::queue_scan();
 }
 unsafe extern "C" fn remove(data: *mut c_void, _: Proxy, name: u32) {

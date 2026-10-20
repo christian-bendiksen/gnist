@@ -74,16 +74,16 @@ pub unsafe extern "C" fn g_io_module_unload(_module: *mut c_void) {
     ox_log!("module unloaded version={}", config::VERSION);
 }
 
-/// Return this module's empty list of extension points.
+/// Keep the attachment module eager rather than caching zero extension points.
+/// A null query result is omitted by gio-querymodules; an empty non-null list
+/// would cache this module as implementing nothing and never trigger its load.
 ///
 /// # Safety
-/// The returned pointer refers to process-lifetime static storage. The caller
-/// must not write through it or free it.
+/// Called by GIO's module probe. Null is safe for the caller to free; never
+/// return static storage because gio-querymodules owns/frees the returned strv.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn g_io_module_query() -> *mut *mut i8 {
-    // Raw pointers are not Sync, so store the null terminator as an integer.
-    static FEATURES: [usize; 1] = [0];
-    FEATURES.as_ptr().cast::<*mut i8>().cast_mut()
+    std::ptr::null_mut()
 }
 
 fn attach_or_retry(attempt: u32) {
