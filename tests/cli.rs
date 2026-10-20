@@ -342,3 +342,102 @@ fn scriptable_output_is_never_decorated() {
     assert!(text.contains("DIRECTORY"), "{text}");
     assert!(!text.contains('\x1b'), "{text}");
 }
+
+fn accent_fixture() -> serde_json::Value {
+    use serde_json::json;
+    let mode = |color: &str, ink: &str| {
+        let mut roles = serde_json::Map::new();
+        for key in ["accent", "accent_dim", "accent_bg", "accent_text", "on_accent", "focus_ring",
+                    "selection_background", "selection_foreground", "cursor", "border_active", "brand_herda"] {
+            roles.insert(key.to_owned(), json!(if key == "on_accent" { ink } else { color }));
+        }
+        json!({"swatch": color, "roles": roles})
+    };
+    json!({"schema": 1, "default": "clay", "choices": [
+        {"id": "clay", "label": "Clay", "modes": {"dark": mode("#EEEEEE", "#111111"), "light": mode("#222222", "#FFFFFF")}},
+        {"id": "sea", "label": "Sea", "modes": {"dark": mode("#99BDF1", "#111111"), "light": mode("#325890", "#FFFFFF")}}
+    ]})
+}
+
+#[test]
+fn accent_selection_reapplies_all_derived_roles_and_survives_modes_and_fixed_themes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let themes = config.join("gnist/themes");
+    for name in ["atelier", "atelier-light", "fixed"] {
+        write_theme(&config, name, "#EEEEEE");
+        fs::write(themes.join(format!("data/{name}/colors.toml")), "accent = \"#EEEEEE\"\nbackground = \"#121212\"\ncolor4 = \"#123456\"\n").unwrap();
+        if name != "fixed" {
+            fs::write(themes.join(format!("data/{name}/accent-choices.json")), accent_fixture().to_string()).unwrap();
+        }
+    }
+    fs::write(themes.join("data/atelier-light/light.mode"), "").unwrap();
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(themes.join("templates/palette.txt.tpl"),
+        "{{ accent }} {{ accent_rgb }} {{ accent_strip }} {{ border_active }} {{ border_active_rgb }} {{ on_accent }} {{ background }} {{ color4 }}\n").unwrap();
+    let run = |args: &[&str]| gnist().args(args).env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", &config).env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_DATA_DIRS", dir.path().join("system")).output().unwrap();
+    let palette = || fs::read_to_string(themes.join("generated/live/palette.txt")).unwrap();
+    let set = |theme: &str| {
+        let output = run(&["set", theme, "--skip-apply"]);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    };
+    set("atelier");
+    assert!(palette().starts_with("#EEEEEE 238,238,238 eeeeee"));
+    fs::write(config.join("gnist/accent.json"), r#"{"accent":"sea"}"#).unwrap();
+    let output = run(&["reapply", "--skip-apply"]);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(palette(), "#99BDF1 153,189,241 99bdf1 #99BDF1 153,189,241 #111111 #121212 #123456\n");
+    let inspect: serde_json::Value = serde_json::from_slice(&run(&["inspect", "atelier"]).stdout).unwrap();
+    assert_eq!(inspect["themes"][0]["accent"], "sea");
+    assert_eq!(inspect["themes"][0]["accentChoices"][1], serde_json::json!({"id":"sea", "label":"Sea", "color":"#99BDF1"}));
+    set("atelier-light");
+    assert_eq!(palette(), "#325890 50,88,144 325890 #325890 50,88,144 #FFFFFF #121212 #123456\n");
+    set("fixed");
+    let fixed = palette();
+    let inspect: serde_json::Value = serde_json::from_slice(&run(&["inspect", "fixed"]).stdout).unwrap();
+    assert_eq!(inspect["themes"][0]["accentChoices"], serde_json::json!([]));
+    // A fixed theme ignores even a broken selection, preserving the legacy path byte for byte.
+    fs::write(config.join("gnist/accent.json"), "broken").unwrap();
+    set("fixed");
+    assert_eq!(palette(), fixed);
+    fs::write(config.join("gnist/accent.json"), r#"{"accent":"sea"}"#).unwrap();
+    set("atelier");
+    assert!(palette().starts_with("#99BDF1"));
+    // A saved choice from another declaring theme uses this theme's own default.
+    fs::write(config.join("gnist/accent.json"), r#"{"accent":"elsewhere"}"#).unwrap();
+    set("atelier");
+    assert!(palette().starts_with("#EEEEEE"));
+}
+
+#[test]
+fn invalid_accent_metadata_never_publishes_a_partial_palette() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let themes = config.join("gnist/themes");
+    write_theme(&config, "atelier", "#EEEEEE");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(themes.join("templates/palette.txt.tpl"), "{{ accent }}").unwrap();
+    let metadata = themes.join("data/atelier/accent-choices.json");
+    fs::write(&metadata, accent_fixture().to_string()).unwrap();
+    let run = || gnist().args(["set", "atelier", "--skip-apply"]).env("HOME", dir.path())
+        .env("XDG_CONFIG_HOME", &config).env("XDG_DATA_HOME", dir.path().join("data"))
+        .env("XDG_DATA_DIRS", dir.path().join("system")).output().unwrap();
+    assert!(run().status.success());
+    let before = fs::read(themes.join("generated/live/palette.txt")).unwrap();
+    for case in 0..6 {
+        let mut data = accent_fixture();
+        match case {
+            0 => data["choices"][1]["modes"]["light"]["roles"]["on_accent"] = serde_json::json!("#325890"),
+            1 => data["choices"][1]["modes"]["dark"]["roles"]["background"] = serde_json::json!("#FFFFFF"),
+            2 => data["choices"][1]["modes"]["dark"]["roles"]["accent"] = serde_json::json!("not a color"),
+            3 => data["choices"][1]["id"] = serde_json::json!("clay"),
+            4 => data["default"] = serde_json::json!("missing"),
+            _ => { data["choices"][1]["modes"]["dark"]["roles"].as_object_mut().unwrap().remove("selection_foreground"); }
+        }
+        fs::write(&metadata, data.to_string()).unwrap();
+        assert!(!run().status.success(), "invalid case {case} was accepted");
+        assert_eq!(fs::read(themes.join("generated/live/palette.txt")).unwrap(), before);
+    }
+}
