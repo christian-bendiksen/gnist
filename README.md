@@ -384,7 +384,7 @@ Gnist is available under the MIT license.
 
 On Herda, gnist-gio attaches a passive motion controller to the maximize control
 in GTK 4 `GtkWindowControls` (including libadwaita) and GTK 3 client-side
-`GtkHeaderBar`s. A 500 ms hover asks for the existing compositor Snap layouts card.
+`GtkHeaderBar`s, including the patched toolkit-owned Herda title rows. A 500 ms hover asks for the existing compositor Snap layouts card.
 The compositor's `snap_flyout_hover` setting remains authoritative. Ordinary
 maximize clicks and toolkit styling are unchanged; helper-drawn titlebars keep
 their existing path. Added glass coverage is **0%**.
@@ -404,3 +404,11 @@ this checkout's executor-built `target/debug/libgnist_gio.so`. It runs real GTK
 windows at scales 1 and 2, with hover enabled and disabled, checks dwell, retained
 hover/leave, pointer-grab rejection and a snap action. Native Files/Text Editor
 checks and serial 4K dark/light captures remain part of release qualification.
+
+Set `GTK_GNIST_DEBUG=1` before launching a fresh host app to trace module loading,
+`attach GTK4`/`GTK3`, snap registry binding, controller attachment and the 500 ms
+rest request. `GTK_DISABLE_GNIST_STYLE` must be unset (its presence disables the
+module). The image installs `/usr/lib/gio/modules/libgnist_gio.so`; it is eagerly
+loaded through normal GIO discovery, without a cached extension-point entry.
+`wayland-info` should report the wire global `herda_snap_layouts_v1`, version 1.
+No GTK settings.ini snap key is required. The compositor setting remains the gate.
