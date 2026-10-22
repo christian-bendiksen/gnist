@@ -55,15 +55,21 @@ impl Layout {
     /// 1 group naming a known layout is an error, which callers read as
     /// native.
     pub fn from_key_file(file: &glib::KeyFile) -> Result<Self, String> {
-        let schema = file.string(GROUP, "Schema").map_err(|error| error.to_string())?;
+        let schema = file
+            .string(GROUP, "Schema")
+            .map_err(|error| error.to_string())?;
         if schema != SCHEMA {
             return Err(format!("schema {schema:?} is not {SCHEMA:?}"));
         }
-        let version = file.integer(GROUP, "Version").map_err(|error| error.to_string())?;
+        let version = file
+            .integer(GROUP, "Version")
+            .map_err(|error| error.to_string())?;
         if version != SCHEMA_VERSION {
             return Err(format!("version {version} is not {SCHEMA_VERSION}"));
         }
-        let layout = file.string(GROUP, "Layout").map_err(|error| error.to_string())?;
+        let layout = file
+            .string(GROUP, "Layout")
+            .map_err(|error| error.to_string())?;
         Self::from_nick(&layout).ok_or_else(|| format!("unknown layout {layout:?}"))
     }
 
@@ -81,7 +87,9 @@ impl Layout {
             }
         };
         let file = glib::KeyFile::new();
-        if let Err(error) = file.load_from_bytes(&glib::Bytes::from_owned(bytes), glib::KeyFileFlags::NONE) {
+        if let Err(error) =
+            file.load_from_bytes(&glib::Bytes::from_owned(bytes), glib::KeyFileFlags::NONE)
+        {
             ox_log!("layout file {} ignored: {error}", path.display());
             return Self::Native;
         }
@@ -171,7 +179,12 @@ fn rearm() {
     let path = config_path();
     let Some(target) = path.parent() else { return };
     let directory = nearest_existing(target);
-    if WATCH.with(|state| state.borrow().as_ref().is_some_and(|watch| watch.directory == directory)) {
+    if WATCH.with(|state| {
+        state
+            .borrow()
+            .as_ref()
+            .is_some_and(|watch| watch.directory == directory)
+    }) {
         return;
     }
 
@@ -188,7 +201,10 @@ fn rearm() {
         if !concerns_layout(file, other) {
             return;
         }
-        ox_log!("layout event {event:?} {}", file.path().unwrap_or_default().display());
+        ox_log!(
+            "layout event {event:?} {}",
+            file.path().unwrap_or_default().display()
+        );
         schedule_refresh();
     });
     ox_log!("watching {}", directory.display());
@@ -212,7 +228,10 @@ fn nearest_existing(target: &Path) -> PathBuf {
 /// on the way to it appearing, moving or going away.
 fn concerns_layout(file: &gio::File, other: Option<&gio::File>) -> bool {
     let path = config_path();
-    let relevant = |file: &gio::File| file.path().is_some_and(|changed| path.starts_with(&changed));
+    let relevant = |file: &gio::File| {
+        file.path()
+            .is_some_and(|changed| path.starts_with(&changed))
+    };
     relevant(file) || other.is_some_and(relevant)
 }
 
@@ -230,7 +249,9 @@ fn schedule_refresh() {
 /// Re-read the authoritative file and publish it. Cheap and idempotent, so any
 /// hint that something changed may call it.
 pub fn refresh(reason: &str) {
-    let Some(gtk) = GTK.with(Cell::get) else { return };
+    let Some(gtk) = GTK.with(Cell::get) else {
+        return;
+    };
     let layout = Layout::read(&config_path());
     let mut changed = 0;
     let mut unchanged = 0;
@@ -244,7 +265,9 @@ pub fn refresh(reason: &str) {
     }
     let layout = layout.nick();
     match unsupported {
-        Some(why) if changed + unchanged == 0 => ox_log!("layout={layout} not published ({reason}): {why}"),
+        Some(why) if changed + unchanged == 0 => {
+            ox_log!("layout={layout} not published ({reason}): {why}")
+        }
         _ if changed == 0 => ox_log!("layout={layout} unchanged ({reason})"),
         _ => ox_log!("layout={layout} ({reason}) on {changed} display(s)"),
     }
@@ -256,7 +279,8 @@ fn display_manager() -> Option<glib::Object> {
         return None;
     }
     let manager = unsafe { symbols.gdk_display_manager_get?() };
-    (!manager.is_null()).then(|| unsafe { from_glib_none(manager.cast::<glib::gobject_ffi::GObject>()) })
+    (!manager.is_null())
+        .then(|| unsafe { from_glib_none(manager.cast::<glib::gobject_ffi::GObject>()) })
 }
 
 /// Publish to displays opened after attach, such as GTK 3's first display.
@@ -264,7 +288,9 @@ fn watch_displays() {
     if DISPLAYS.with(|state| state.borrow().is_some()) {
         return;
     }
-    let Some(manager) = display_manager() else { return };
+    let Some(manager) = display_manager() else {
+        return;
+    };
     let handler = manager.connect_local("display-opened", true, |_| {
         refresh("display-opened");
         None
@@ -273,9 +299,15 @@ fn watch_displays() {
 }
 
 fn all_settings(gtk: GtkApi) -> Vec<glib::Object> {
-    let Some(symbols) = symbols::core() else { return Vec::new() };
-    let Some(manager) = display_manager() else { return Vec::new() };
-    let Some(list_displays) = symbols.gdk_display_manager_list_displays else { return Vec::new() };
+    let Some(symbols) = symbols::core() else {
+        return Vec::new();
+    };
+    let Some(manager) = display_manager() else {
+        return Vec::new();
+    };
+    let Some(list_displays) = symbols.gdk_display_manager_list_displays else {
+        return Vec::new();
+    };
 
     let mut settings = Vec::new();
     unsafe {
@@ -292,7 +324,11 @@ fn all_settings(gtk: GtkApi) -> Vec<glib::Object> {
     settings
 }
 
-fn settings_for_display(symbols: &symbols::CoreSyms, gtk: GtkApi, display: *mut c_void) -> Option<glib::Object> {
+fn settings_for_display(
+    symbols: &symbols::CoreSyms,
+    gtk: GtkApi,
+    display: *mut c_void,
+) -> Option<glib::Object> {
     if display.is_null() {
         return None;
     }
@@ -308,7 +344,8 @@ fn settings_for_display(symbols: &symbols::CoreSyms, gtk: GtkApi, display: *mut 
             }
         }
     };
-    (!settings.is_null()).then(|| unsafe { from_glib_none(settings.cast::<glib::gobject_ffi::GObject>()) })
+    (!settings.is_null())
+        .then(|| unsafe { from_glib_none(settings.cast::<glib::gobject_ffi::GObject>()) })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -343,7 +380,8 @@ mod tests {
 
     fn parse(text: &str) -> Result<Layout, String> {
         let file = glib::KeyFile::new();
-        file.load_from_data(text, glib::KeyFileFlags::NONE).map_err(|error| error.to_string())?;
+        file.load_from_data(text, glib::KeyFileFlags::NONE)
+            .map_err(|error| error.to_string())?;
         Layout::from_key_file(&file)
     }
 
@@ -375,7 +413,8 @@ mod tests {
             doc("Herda-Desktop"),
             doc("windows"),
             doc(""),
-            "{\"schema\":\"org.herda.GtkLayout\",\"version\":1,\"layout\":\"herda-desktop\"}".into(),
+            "{\"schema\":\"org.herda.GtkLayout\",\"version\":1,\"layout\":\"herda-desktop\"}"
+                .into(),
         ] {
             assert!(parse(&bad).is_err(), "{bad:?}");
         }
@@ -414,7 +453,10 @@ mod tests {
                 let sibling = Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../../herda/distro/build/patches/gtk-layout-fixtures");
                 if !sibling.join("expected.tsv").is_file() {
-                    eprintln!("no shared fixtures at {}; set GTK_LAYOUT_FIXTURES to require them", sibling.display());
+                    eprintln!(
+                        "no shared fixtures at {}; set GTK_LAYOUT_FIXTURES to require them",
+                        sibling.display()
+                    );
                     return;
                 }
                 sibling
@@ -425,10 +467,16 @@ mod tests {
         let scratch = std::env::temp_dir().join(format!("gnist-fixtures-{}", std::process::id()));
         let mut listed = std::collections::BTreeSet::new();
 
-        for line in manifest.lines().filter(|line| !line.trim().is_empty() && !line.starts_with('#')) {
+        for line in manifest
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        {
             let fields: Vec<&str> = line.split('\t').collect();
-            let [case, kind, expected] = fields[..] else { panic!("expected CASE KIND EXPECTED: {line:?}") };
-            let expected = Layout::from_nick(expected).unwrap_or_else(|| panic!("{case}: layout {expected:?}"));
+            let [case, kind, expected] = fields[..] else {
+                panic!("expected CASE KIND EXPECTED: {line:?}")
+            };
+            let expected = Layout::from_nick(expected)
+                .unwrap_or_else(|| panic!("{case}: layout {expected:?}"));
             assert!(listed.insert(case.to_owned()), "{case} is listed twice");
 
             let config = scratch.join(case);
@@ -451,7 +499,8 @@ mod tests {
                 }
                 "symlink" => {
                     let source = directory.join("valid-herda.ini");
-                    std::os::unix::fs::symlink(std::fs::canonicalize(source).unwrap(), &target).unwrap();
+                    std::os::unix::fs::symlink(std::fs::canonicalize(source).unwrap(), &target)
+                        .unwrap();
                 }
                 other => panic!("{case}: unknown kind {other:?}"),
             }
@@ -462,18 +511,30 @@ mod tests {
         for entry in std::fs::read_dir(&directory).unwrap() {
             let name = entry.unwrap().file_name().into_string().unwrap();
             if let Some(case) = name.strip_suffix(".ini") {
-                assert!(listed.contains(case), "{name} is not listed in expected.tsv");
+                assert!(
+                    listed.contains(case),
+                    "{name} is not listed in expected.tsv"
+                );
             }
         }
         assert!(!listed.is_empty());
-        eprintln!("{} shared cases from {} agree", listed.len(), directory.display());
+        eprintln!(
+            "{} shared cases from {} agree",
+            listed.len(),
+            directory.display()
+        );
         std::fs::remove_dir_all(&scratch).unwrap();
     }
 
     /// Read the layout in a fresh test process whose XDG_CONFIG_HOME is `config`.
     fn read_in_child(config: &Path) -> Layout {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "layout::tests::fixture_child", "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                "layout::tests::fixture_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(FIXTURE_CHILD, "1")
             .env("XDG_CONFIG_HOME", config)
             .stdout(std::process::Stdio::piped())
@@ -529,7 +590,11 @@ mod tests {
             fn properties() -> &'static [glib::ParamSpec] {
                 static PROPS: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
                 PROPS.get_or_init(|| {
-                    vec![glib::ParamSpecString::builder("gtk-herda-layout").default_value(Some("native")).build()]
+                    vec![
+                        glib::ParamSpecString::builder("gtk-herda-layout")
+                            .default_value(Some("native"))
+                            .build(),
+                    ]
                 })
             }
 
@@ -560,9 +625,15 @@ mod tests {
         settings.connect_notify_local(Some(PROPERTY), move |_, _| seen.set(seen.get() + 1));
 
         assert_eq!(set_layout(&settings, Layout::Native), Publish::Unchanged);
-        assert_eq!(set_layout(&settings, Layout::HerdaDesktop), Publish::Changed);
+        assert_eq!(
+            set_layout(&settings, Layout::HerdaDesktop),
+            Publish::Changed
+        );
         assert_eq!(settings.property::<String>(PROPERTY), "herda-desktop");
-        assert_eq!(set_layout(&settings, Layout::HerdaDesktop), Publish::Unchanged);
+        assert_eq!(
+            set_layout(&settings, Layout::HerdaDesktop),
+            Publish::Unchanged
+        );
         assert_eq!(set_layout(&settings, Layout::Native), Publish::Changed);
         assert_eq!(notified.get(), 2);
 
@@ -574,16 +645,25 @@ mod tests {
     #[test]
     fn unpatched_toolkit_is_left_alone() {
         let settings = glib::Object::new::<glib::Object>();
-        assert!(matches!(set_layout(&settings, Layout::HerdaDesktop), Publish::Unsupported(_)));
+        assert!(matches!(
+            set_layout(&settings, Layout::HerdaDesktop),
+            Publish::Unsupported(_)
+        ));
     }
 
     #[test]
     fn layout_path_is_glibs_user_config_dir() {
         // The toolkit reads g_get_user_config_dir()/herda/gtk-layout.ini.
         let expected = unsafe {
-            std::ffi::CStr::from_ptr(glib::ffi::g_get_user_config_dir()).to_str().unwrap().to_owned()
+            std::ffi::CStr::from_ptr(glib::ffi::g_get_user_config_dir())
+                .to_str()
+                .unwrap()
+                .to_owned()
         };
-        assert_eq!(config_path(), Path::new(&expected).join("herda/gtk-layout.ini"));
+        assert_eq!(
+            config_path(),
+            Path::new(&expected).join("herda/gtk-layout.ini")
+        );
     }
 
     #[test]
@@ -592,7 +672,10 @@ mod tests {
         std::fs::create_dir_all(&base).unwrap();
         assert_eq!(nearest_existing(&base.join("config/herda")), base);
         std::fs::create_dir_all(base.join("config")).unwrap();
-        assert_eq!(nearest_existing(&base.join("config/herda")), base.join("config"));
+        assert_eq!(
+            nearest_existing(&base.join("config/herda")),
+            base.join("config")
+        );
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

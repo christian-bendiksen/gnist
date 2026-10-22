@@ -45,7 +45,9 @@ impl OwnedGObject {
 
 impl Drop for OwnedGObject {
     fn drop(&mut self) {
-        let Some(symbols) = symbols::core() else { return };
+        let Some(symbols) = symbols::core() else {
+            return;
+        };
         unsafe { (symbols.g_object_unref)(self.pointer.as_ptr()) };
     }
 }
@@ -103,7 +105,9 @@ pub fn attach(gtk: GtkApi) {
         return;
     }
 
-    let Some(symbols) = symbols::core() else { return };
+    let Some(symbols) = symbols::core() else {
+        return;
+    };
     let Some(owner) = gtk_owner(symbols, gtk) else {
         // gdk_display_manager_get() aborts on GTK >= 4.20 unless gtk_init()
         // has run, and once it has the default display already exists, so
@@ -142,12 +146,19 @@ pub fn attach(gtk: GtkApi) {
     );
 
     STYLE.with(|state| {
-        state.replace(Some(StyleState { owner, provider, path, gtk }));
+        state.replace(Some(StyleState {
+            owner,
+            provider,
+            path,
+            gtk,
+        }));
     });
 }
 
 pub fn update_and_reload(signal_path: &str, mode: Mode) {
-    let Some(reload) = update_path(signal_path) else { return };
+    let Some(reload) = update_path(signal_path) else {
+        return;
+    };
 
     ox_log!(
         "{} reload owner={:p} provider={:p} path={}",
@@ -167,7 +178,8 @@ pub fn update_and_reload(signal_path: &str, mode: Mode) {
         return;
     }
 
-    let Some(set_opacity) = symbols::core().and_then(|symbols| symbols.gtk_widget_set_opacity) else {
+    let Some(set_opacity) = symbols::core().and_then(|symbols| symbols.gtk_widget_set_opacity)
+    else {
         reload_instant(&reload, mode, "no-opacity-symbol");
         return;
     };
@@ -257,12 +269,16 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
 fn animations_enabled() -> bool {
     use glib::prelude::*;
 
-    let Some(get_settings) = symbols::core().and_then(|symbols| symbols.gtk_settings_get_default) else {
+    let Some(get_settings) = symbols::core().and_then(|symbols| symbols.gtk_settings_get_default)
+    else {
         return true;
     };
-    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else { return true };
-    let settings: glib::Object =
-        unsafe { glib::translate::from_glib_none(settings.as_ptr().cast::<glib::gobject_ffi::GObject>()) };
+    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else {
+        return true;
+    };
+    let settings: glib::Object = unsafe {
+        glib::translate::from_glib_none(settings.as_ptr().cast::<glib::gobject_ffi::GObject>())
+    };
     settings
         .find_property("gtk-enable-animations")
         .filter(|pspec| pspec.value_type() == glib::Type::BOOL)
@@ -292,7 +308,9 @@ fn reload_css_and_notify(reload: &ReloadTarget, reason: &'static str) {
 }
 
 fn load_css(provider: GObjectPtr, path: &Path, gtk: GtkApi) {
-    let Some(symbols) = symbols::core() else { return };
+    let Some(symbols) = symbols::core() else {
+        return;
+    };
     let Some(path) = path.to_str() else {
         ox_log!("CSS path is not valid UTF-8: {}", path.display());
         return;
@@ -325,16 +343,26 @@ fn apply_gtk3_mode(mode: Mode) {
         return;
     }
 
-    let Some(symbols) = symbols::core() else { return };
-    let Some(get_settings) = symbols.gtk_settings_get_default else { return };
-    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else { return };
-    let Some(prefer_dark) = mode.prefer_dark() else { return };
+    let Some(symbols) = symbols::core() else {
+        return;
+    };
+    let Some(get_settings) = symbols.gtk_settings_get_default else {
+        return;
+    };
+    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else {
+        return;
+    };
+    let Some(prefer_dark) = mode.prefer_dark() else {
+        return;
+    };
 
     let prefer_dark: libc::c_int = prefer_dark.into();
     let theme = config::gtk3_theme_name(mode);
 
     if let Some(theme) = theme {
-        let Ok(theme_c) = CString::new(theme) else { return };
+        let Ok(theme_c) = CString::new(theme) else {
+            return;
+        };
         unsafe {
             g_object_set(
                 settings.as_ptr(),
@@ -368,14 +396,18 @@ fn notify_gtk_theme_two_phase(reason: &'static str) {
 }
 
 fn notify_gtk_theme(phase: &str) {
-    let Some(symbols) = symbols::core() else { return };
+    let Some(symbols) = symbols::core() else {
+        return;
+    };
     let (Some(get_settings), Some(notify)) =
         (symbols.gtk_settings_get_default, symbols.g_object_notify)
     else {
         return;
     };
 
-    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else { return };
+    let Some(settings) = GObjectPtr::from_raw(unsafe { get_settings() }) else {
+        return;
+    };
     unsafe {
         notify(settings.as_ptr(), c"gtk-theme-name".as_ptr());
         notify(
@@ -385,7 +417,6 @@ fn notify_gtk_theme(phase: &str) {
     }
     ox_log!("notified GtkSettings {phase}");
 }
-
 
 fn tick_fade() -> glib::ControlFlow {
     let mut midpoint_reload = None;
@@ -443,7 +474,9 @@ fn tick_fade() -> glib::ControlFlow {
 }
 
 fn collect_fade_targets(gtk: GtkApi) -> Vec<OwnedGObject> {
-    let Some(symbols) = symbols::core() else { return Vec::new() };
+    let Some(symbols) = symbols::core() else {
+        return Vec::new();
+    };
     let Some(windows) = collect_windows(symbols) else {
         return Vec::new();
     };
@@ -455,19 +488,28 @@ fn collect_fade_targets(gtk: GtkApi) -> Vec<OwnedGObject> {
         .iter()
         .flat_map(|window| {
             let children = window_children(symbols, gtk, window);
-            if children.is_empty() { vec![window] } else { children }
+            if children.is_empty() {
+                vec![window]
+            } else {
+                children
+            }
         })
         .filter_map(OwnedGObject::retain)
         .collect()
 }
 
-fn window_children(symbols: &symbols::CoreSyms, gtk: GtkApi, window: GObjectPtr) -> Vec<GObjectPtr> {
+fn window_children(
+    symbols: &symbols::CoreSyms,
+    gtk: GtkApi,
+    window: GObjectPtr,
+) -> Vec<GObjectPtr> {
     let mut children = Vec::new();
     match gtk {
         GtkApi::Gtk4 => {
-            let (Some(first), Some(next)) =
-                (symbols.gtk_widget_get_first_child, symbols.gtk_widget_get_next_sibling)
-            else {
+            let (Some(first), Some(next)) = (
+                symbols.gtk_widget_get_first_child,
+                symbols.gtk_widget_get_next_sibling,
+            ) else {
                 return children;
             };
             let mut child = GObjectPtr::from_raw(unsafe { first(window.as_ptr()) });
@@ -578,14 +620,19 @@ fn attach_provider(
 }
 
 fn wait_for_display(gtk: GtkApi) {
-    let Some(symbols) = symbols::core() else { return };
-    let (Some(get_manager), Some(connect)) =
-        (symbols.gdk_display_manager_get, symbols.g_signal_connect_data)
-    else {
+    let Some(symbols) = symbols::core() else {
+        return;
+    };
+    let (Some(get_manager), Some(connect)) = (
+        symbols.gdk_display_manager_get,
+        symbols.g_signal_connect_data,
+    ) else {
         return;
     };
 
-    let Some(manager) = GObjectPtr::from_raw(unsafe { get_manager() }) else { return };
+    let Some(manager) = GObjectPtr::from_raw(unsafe { get_manager() }) else {
+        return;
+    };
     PENDING_DISPLAY_ATTACH.with(|pending| pending.set(Some(gtk)));
 
     unsafe {

@@ -123,9 +123,7 @@ mod tests {
         parse(src)
             .iter()
             .filter_map(|t| match t {
-                Token::Var { key, .. } | Token::Expr { expr: key, .. } => {
-                    Some((*key).to_owned())
-                }
+                Token::Var { key, .. } | Token::Expr { expr: key, .. } => Some((*key).to_owned()),
                 _ => None,
             })
             .collect()

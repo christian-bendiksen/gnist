@@ -159,9 +159,7 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                         }
                     }
                     let num: String = chars[start..i].iter().collect();
-                    let value: f64 = num
-                        .parse()
-                        .map_err(|_| format!("invalid number `{num}`"))?;
+                    let value: f64 = num.parse().map_err(|_| format!("invalid number `{num}`"))?;
                     tokens.push(Tok::Num(value));
                 } else if c.is_ascii_alphabetic() || c == '_' {
                     let start = i;
@@ -431,17 +429,15 @@ impl Parser {
 // Evaluation
 // ---------------------------------------------------------------------------
 
-fn eval(
-    ast: &Ast,
-    values: &HashMap<String, Value>,
-    overlay: &HashMap<String, Value>,
-) -> Value {
+fn eval(ast: &Ast, values: &HashMap<String, Value>, overlay: &HashMap<String, Value>) -> Value {
     match ast {
         Ast::Num(v) => Value::Float(*v),
         Ast::Str(s) => Value::Str(s.clone()),
         Ast::Bool(b) => Value::Bool(*b),
         Ast::Nil => Value::Missing,
-        Ast::Var(name) => lookup(values, overlay, name).cloned().unwrap_or(Value::Missing),
+        Ast::Var(name) => lookup(values, overlay, name)
+            .cloned()
+            .unwrap_or(Value::Missing),
         Ast::Index(base, index) => match eval(base, values, overlay) {
             Value::List(items) => match eval(index, values, overlay).as_f64() {
                 Some(i) if i >= 0.0 && i.fract() == 0.0 => {
@@ -456,9 +452,11 @@ fn eval(
             None => Value::Missing,
         },
         Ast::Not(inner) => Value::Bool(!eval(inner, values, overlay).is_truthy()),
-        Ast::Bin(op, left, right) => {
-            eval_bin(*op, eval(left, values, overlay), eval(right, values, overlay))
-        }
+        Ast::Bin(op, left, right) => eval_bin(
+            *op,
+            eval(left, values, overlay),
+            eval(right, values, overlay),
+        ),
         Ast::Pipe(base, name, args) => {
             let input = eval(base, values, overlay);
             let args: Vec<Value> = args.iter().map(|a| eval(a, values, overlay)).collect();
@@ -691,8 +689,17 @@ fn apply_filter(name: &str, input: Value, args: Vec<Value>) -> Value {
         },
         "join" => match input {
             Value::List(items) => {
-                let sep = args.first().map(|a| a.display()).unwrap_or_else(|| ",".into());
-                Value::Str(items.iter().map(Value::display).collect::<Vec<_>>().join(&sep))
+                let sep = args
+                    .first()
+                    .map(|a| a.display())
+                    .unwrap_or_else(|| ",".into());
+                Value::Str(
+                    items
+                        .iter()
+                        .map(Value::display)
+                        .collect::<Vec<_>>()
+                        .join(&sep),
+                )
             }
             other => Value::Str(other.display()),
         },
@@ -793,7 +800,10 @@ mod tests {
         assert_eq!(eval_to_string("accent | mix background 0.5"), "#546994");
         assert_eq!(eval_to_string("accent | lighten 0.1"), "#95bcfb");
         assert_eq!(eval_to_string("accent | darken 0.1"), "#7ba2e1");
-        assert_eq!(eval_to_string("accent | alpha 0.5 | rgba"), "rgba(137,180,250,0.5)");
+        assert_eq!(
+            eval_to_string("accent | alpha 0.5 | rgba"),
+            "rgba(137,180,250,0.5)"
+        );
         assert_eq!(eval_to_string("accent | invert"), "#764b05");
         assert_eq!(eval_to_string("background | contrast"), "#ffffff");
         assert_eq!(eval_to_string("accent | complement"), "#facf89");
