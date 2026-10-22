@@ -7,7 +7,8 @@ pub type GetMajorVersion = unsafe extern "C" fn() -> u32;
 pub type IsInitialized = unsafe extern "C" fn() -> i32;
 pub type CssProviderNew = unsafe extern "C" fn() -> *mut c_void;
 pub type CssProviderLoadGtk4 = unsafe extern "C" fn(*mut c_void, *const c_char);
-pub type CssProviderLoadGtk3 = unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_void) -> i32;
+pub type CssProviderLoadGtk3 =
+    unsafe extern "C" fn(*mut c_void, *const c_char, *mut *mut c_void) -> i32;
 pub type DisplayGetDefault = unsafe extern "C" fn() -> *mut c_void;
 pub type ScreenGetDefault = unsafe extern "C" fn() -> *mut c_void;
 pub type AddProvider = unsafe extern "C" fn(*mut c_void, *mut c_void, u32);

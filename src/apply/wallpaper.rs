@@ -6,9 +6,9 @@
 //! transition_type     = "fade"
 //! transition_duration = "0.6"
 //! ```
-use crate::{ctx::Ctx, theme::Theme, util};
 use crate::render::engine::render_str;
 use crate::render::value::Value;
+use crate::{ctx::Ctx, theme::Theme, util};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashMap,

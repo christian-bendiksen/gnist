@@ -16,27 +16,31 @@ pub fn subscribe() {
         return;
     }
 
-    gio::bus_get(gio::BusType::Session, gio::Cancellable::NONE, |result| match result {
-        Ok(connection) => {
-            let id = connection.signal_subscribe(
-                None::<&str>,
-                Some("org.gnist.Appearance1"),
-                Some("Changed"),
-                Some("/org/gnist/Appearance1"),
-                None::<&str>,
-                gio::DBusSignalFlags::NONE,
-                |_connection, _sender, _path, _interface, _signal, parameters| {
-                    handle_changed(parameters);
-                },
-            );
+    gio::bus_get(
+        gio::BusType::Session,
+        gio::Cancellable::NONE,
+        |result| match result {
+            Ok(connection) => {
+                let id = connection.signal_subscribe(
+                    None::<&str>,
+                    Some("org.gnist.Appearance1"),
+                    Some("Changed"),
+                    Some("/org/gnist/Appearance1"),
+                    None::<&str>,
+                    gio::DBusSignalFlags::NONE,
+                    |_connection, _sender, _path, _interface, _signal, parameters| {
+                        handle_changed(parameters);
+                    },
+                );
 
-            SUBSCRIPTION.with(|state| {
-                state.replace(Some(Subscription { connection, id }));
-            });
-            ox_log!("subscribed to D-Bus signal");
-        }
-        Err(error) => ox_log!("D-Bus connect failed: {error}"),
-    });
+                SUBSCRIPTION.with(|state| {
+                    state.replace(Some(Subscription { connection, id }));
+                });
+                ox_log!("subscribed to D-Bus signal");
+            }
+            Err(error) => ox_log!("D-Bus connect failed: {error}"),
+        },
+    );
 }
 
 pub fn unsubscribe() {

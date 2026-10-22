@@ -185,7 +185,12 @@ fn render_range(
                                         let mut child = overlay.clone();
                                         child.insert(item.to_owned(), item_value);
                                         render_range(
-                                            tokens, i + 1, inner_end, values, &child, &mut inner,
+                                            tokens,
+                                            i + 1,
+                                            inner_end,
+                                            values,
+                                            &child,
+                                            &mut inner,
                                         );
                                     }
                                 }
@@ -269,7 +274,9 @@ fn split_each(rest: &str) -> Option<(&str, &str)> {
         let item = rest[pos + 4..].trim();
         if !list.is_empty()
             && !item.is_empty()
-            && item.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            && item
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
             return Some((list, item));
         }
@@ -462,10 +469,7 @@ mod tests {
     #[test]
     fn filters_expand_in_line() {
         let vars = str_map(&[("accent", "#89b4fa")]);
-        assert_eq!(
-            render_str("{{ accent | lighten 0.1 }}", &vars),
-            "#95bcfb"
-        );
+        assert_eq!(render_str("{{ accent | lighten 0.1 }}", &vars), "#95bcfb");
     }
 
     #[test]
@@ -510,10 +514,7 @@ mod tests {
             "d"
         );
         assert_eq!(
-            render_str(
-                "{{#unless mode == \"light\"}}dark{{/unless}}",
-                &vars
-            ),
+            render_str("{{#unless mode == \"light\"}}dark{{/unless}}", &vars),
             "dark"
         );
     }

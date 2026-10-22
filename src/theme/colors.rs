@@ -295,7 +295,11 @@ impl Rgb {
         let l = self.luminance();
         let black = (l + 0.05) / 0.05;
         let white = 1.05 / (l + 0.05);
-        if black >= white { Self::BLACK } else { Self::WHITE }
+        if black >= white {
+            Self::BLACK
+        } else {
+            Self::WHITE
+        }
     }
 
     pub fn saturate(self, amount: f32) -> Self {
@@ -566,7 +570,10 @@ mod tests {
         assert_eq!(normalize_color("rgba.hex(89b4fa)"), "#89b4fa");
         assert_eq!(normalize_color("rgba.hex('89B4FA')"), "#89b4fa");
         assert_eq!(normalize_color("rgba.rgb(137, 180, 250)"), "#89b4fa");
-        assert_eq!(normalize_color("rgba.addressable(137, 180, 250, 255)"), "#89b4fa");
+        assert_eq!(
+            normalize_color("rgba.addressable(137, 180, 250, 255)"),
+            "#89b4fa"
+        );
     }
 
     #[test]
