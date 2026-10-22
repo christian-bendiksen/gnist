@@ -238,7 +238,8 @@ mod tests {
         fs::create_dir(&dropins).unwrap();
         binding(&dropins.join("theme.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
+        let (actions, warnings) =
+            parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert!(warnings.is_empty());
         assert_eq!(
@@ -258,7 +259,8 @@ mod tests {
         fs::write(dropins.join("10-malformed.kdl"), "bind {").unwrap();
         binding(&dropins.join("20-valid.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
+        let (actions, warnings) =
+            parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert_eq!(
             actions,
@@ -279,7 +281,8 @@ mod tests {
         fs::write(dropins.join("10-unreadable.kdl"), [0xff]).unwrap();
         binding(&dropins.join("20-valid.kdl"), "/dropin");
 
-        let (actions, warnings) = parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
+        let (actions, warnings) =
+            parse_reload_files(&binding_paths(dir.path()), &empty_values()).unwrap();
 
         assert_eq!(
             actions,
