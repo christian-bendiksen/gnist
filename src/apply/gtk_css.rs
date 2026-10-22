@@ -23,13 +23,7 @@ const DBUS_SIGNAL: &str = "org.gnist.Appearance1.Changed";
 pub fn refresh_user_css_links(ctx: &Ctx) {
     use std::os::unix::fs::symlink;
 
-    let target = ctx.current_link.join("gtk.css");
-    let dirs = [
-        ctx.config_home.join("gtk-3.0"),
-        ctx.config_home.join("gtk-4.0"),
-    ];
-
-    for dir in &dirs {
+    for (dir, target) in user_css_links(&ctx.config_home, &ctx.current_link) {
         let dst = dir.join("gtk.css");
         let tmp = dir.join(".gtk.css.gnist.tmp");
         let _ = fs::remove_file(&tmp);
@@ -37,6 +31,24 @@ pub fn refresh_user_css_links(ctx: &Ctx) {
             let _ = fs::rename(&tmp, &dst);
         }
     }
+}
+
+/// Each GTK version's user CSS directory and the published file it links to.
+///
+/// GTK 4 reads `gtk.css`. GTK 3 cannot parse what GTK 4 and libadwaita do
+/// (`color-mix()`, `@media`, `:root`), so a theme that publishes a `gtk3.css`
+/// gives GTK 3 that file; without one, GTK 3 reads `gtk.css` as before.
+pub fn user_css_links(config_home: &Path, current: &Path) -> [(PathBuf, PathBuf); 2] {
+    let gtk3 = current.join("gtk3.css");
+    let gtk3 = if gtk3.is_file() {
+        gtk3
+    } else {
+        current.join("gtk.css")
+    };
+    [
+        (config_home.join("gtk-3.0"), gtk3),
+        (config_home.join("gtk-4.0"), current.join("gtk.css")),
+    ]
 }
 
 pub fn emit_current(ctx: &Ctx, theme: Option<&Theme>) -> Result<()> {
@@ -104,4 +116,24 @@ fn emit_changed_signal(revision: u64, css_path: &Path, mode: &str) -> Result<()>
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gtk3_reads_the_gtk3_file_when_the_theme_publishes_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("current");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("gtk.css"), "").unwrap();
+        let home = dir.path().join("config");
+        let links = user_css_links(&home, &current);
+        assert_eq!(links[0], (home.join("gtk-3.0"), current.join("gtk.css")));
+        fs::write(current.join("gtk3.css"), "").unwrap();
+        let links = user_css_links(&home, &current);
+        assert_eq!(links[0], (home.join("gtk-3.0"), current.join("gtk3.css")));
+        assert_eq!(links[1], (home.join("gtk-4.0"), current.join("gtk.css")));
+    }
 }
