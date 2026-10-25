@@ -162,11 +162,25 @@ fn lex(src: &str) -> Result<Vec<Tok>, String> {
                     let value: f64 = num.parse().map_err(|_| format!("invalid number `{num}`"))?;
                     tokens.push(Tok::Num(value));
                 } else if c.is_ascii_alphabetic() || c == '_' {
-                    let start = i;
-                    while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
-                        i += 1;
+                    // A dotted name is the nested TOML key it spells:
+                    // `workpiece.accent` reads `[workpiece] accent`, which
+                    // `colors.toml` flattens to `workpiece_accent`.
+                    let mut word = String::new();
+                    loop {
+                        while i < n && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                            word.push(chars[i]);
+                            i += 1;
+                        }
+                        if i + 1 < n
+                            && chars[i] == '.'
+                            && (chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_')
+                        {
+                            word.push('_');
+                            i += 1;
+                        } else {
+                            break;
+                        }
                     }
-                    let word: String = chars[start..i].iter().collect();
                     tokens.push(match word.as_str() {
                         "and" => Tok::And,
                         "or" => Tok::Or,
@@ -747,6 +761,28 @@ mod tests {
         assert_eq!(eval_to_string("10 / 4"), "2.5");
         assert_eq!(eval_to_string("1 == 1"), "true");
         assert_eq!(eval_to_string("'a' + 'b'"), "ab");
+    }
+
+    #[test]
+    fn dotted_names_read_nested_keys() {
+        let mut ctx = context();
+        ctx.insert("workpiece_accent".into(), Value::Str("#4386de".into()));
+        let empty = HashMap::new();
+        assert_eq!(
+            eval_expr("workpiece.accent", &ctx, &empty).display(),
+            "#4386de"
+        );
+        assert_eq!(
+            eval_expr("workpiece.accent | default accent", &ctx, &empty).display(),
+            "#4386de"
+        );
+        // Unset, the fallback chain reaches the accent.
+        assert_eq!(
+            eval_to_string("workpiece.accent | default seam.color | default accent"),
+            "#89b4fa"
+        );
+        // A number keeps its decimal point; only a name continues a name.
+        assert_eq!(eval_to_string("radius * 1.5"), "12");
     }
 
     #[test]
