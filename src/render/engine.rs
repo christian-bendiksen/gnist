@@ -349,6 +349,22 @@ mod tests {
     }
 
     #[test]
+    fn a_dotted_name_renders_its_nested_key_or_falls_back() {
+        let tpl = r##""seam": "{{ workpiece.accent | default seam_color | default accent }}""##;
+        let themed = str_map(&[("accent", "#ffbc50"), ("workpiece_accent", "#4386de")]);
+        assert_eq!(render_str(tpl, &themed), r##""seam": "#4386de""##);
+        // On its own, too: a dotted name is an expression, not a plain key.
+        assert_eq!(render_str("{{ workpiece.accent }}", &themed), "#4386de");
+        let plain = str_map(&[("accent", "#ffbc50")]);
+        assert_eq!(render_str(tpl, &plain), r##""seam": "#ffbc50""##);
+        // Missing and without a fallback, the placeholder stays visible.
+        assert_eq!(
+            render_str("{{ workpiece.accent }}", &plain),
+            "{{ workpiece.accent }}"
+        );
+    }
+
+    #[test]
     fn merges_all_template_layers_in_precedence_order() {
         let dir = tempfile::tempdir().unwrap();
         let user_templates = dir.path().join("config/user-templates");
