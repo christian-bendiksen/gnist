@@ -353,6 +353,8 @@ mod tests {
         let tpl = r##""seam": "{{ workpiece.accent | default seam_color | default accent }}""##;
         let themed = str_map(&[("accent", "#ffbc50"), ("workpiece_accent", "#4386de")]);
         assert_eq!(render_str(tpl, &themed), r##""seam": "#4386de""##);
+        // On its own, too: a dotted name is an expression, not a plain key.
+        assert_eq!(render_str("{{ workpiece.accent }}", &themed), "#4386de");
         let plain = str_map(&[("accent", "#ffbc50")]);
         assert_eq!(render_str(tpl, &plain), r##""seam": "#ffbc50""##);
         // Missing and without a fallback, the placeholder stays visible.
