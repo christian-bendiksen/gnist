@@ -132,6 +132,14 @@ values: `name`, `mode` (`light`/`dark`), `is_light`, `colors` (the 16 ANSI
 colors as a list), `wallpapers` (background image paths), and
 `border_active` / `border_inactive`.
 
+A nested key can be read by its dotted name: `{{ workpiece.accent }}` reads
+`[workpiece] accent`, which is the same value as `{{ workpiece_accent }}`.
+Combined with `default`, a dotted name falls back step by step:
+
+```text
+{{ workpiece.accent | default seam_color | default accent }}
+```
+
 Expressions and math:
 
 ```text
@@ -178,6 +186,12 @@ fallback instead.
 
 Output filenames are templated too: `kitty.{{ name }}.conf.tpl` renders to
 `kitty.dusk.conf`.
+
+Templates are rendered when a theme is published (`gnist set`, `gnist
+reapply`), not while it is current. A value that changes at runtime, such as
+the accent of the work in front of you, belongs to the program that draws
+it, which receives it over its own interface. The template supplies only the
+fallback that program uses when nothing has been set.
 
 ### Templated integrations
 
@@ -375,6 +389,15 @@ runtime theme switch.
 configuration built this way. Its Malm profiles select a default Gnist theme,
 and `smia-session` applies that theme when the desktop starts. You can still run
 `gnist set THEME` directly for a temporary runtime change.
+
+Smia's Herda themes are generated from one perceptual specification
+(`tools/herda-palette.py` in Smia). Besides the semantic keys above they carry
+`role1` … `role8`, Ambolt's eight workpiece accents (one ring at OKLCH L .62
+C .15, hues 45° apart from the accent's), `machine` (a desaturated violet
+for what the machine wrote) and `on_role` (ink on an accent chip). Smia's
+templates publish them to GTK (`@herda_role1_color` …), to the shell
+(`quickshell.json`) and to the compositor. A theme without them falls back
+to its nearest ANSI colours.
 
 ## License
 
