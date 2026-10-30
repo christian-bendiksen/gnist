@@ -346,7 +346,7 @@ fn cmd_remove(
 
     let fallback = if removing_current {
         lower_theme_root(ctx, name)
-            .map(|root| Theme::load_root(root, name))
+            .map(|root| Theme::load_root(ctx, root, name))
             .transpose()
             .context("load lower-precedence replacement theme")?
     } else {

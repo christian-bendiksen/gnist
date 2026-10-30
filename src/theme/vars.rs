@@ -7,7 +7,15 @@ use std::{collections::HashMap, fs, path::Path};
 ///
 /// Scalars become typed values (integers, floats, booleans, lists) while
 /// strings keep their raw spelling so plain `{{ key }}` output is unchanged.
+#[cfg(test)]
 pub fn build_vars_from_colors(colors_file: &Path) -> Result<HashMap<String, Value>> {
+    build_vars_with_overrides(colors_file, &HashMap::new())
+}
+
+pub fn build_vars_with_overrides(
+    colors_file: &Path,
+    overrides: &HashMap<String, String>,
+) -> Result<HashMap<String, Value>> {
     let src = fs::read_to_string(colors_file)
         .with_context(|| format!("read {}", colors_file.display()))?;
 
@@ -15,6 +23,11 @@ pub fn build_vars_from_colors(colors_file: &Path) -> Result<HashMap<String, Valu
 
     let mut vars = HashMap::new();
     flatten("", &table, &mut vars);
+    vars.extend(
+        overrides
+            .iter()
+            .map(|(key, value)| (key.clone(), Value::Str(value.clone()))),
+    );
 
     // Collect first because the map cannot be extended while it is being iterated.
     let derived: Vec<(String, Value)> = vars
