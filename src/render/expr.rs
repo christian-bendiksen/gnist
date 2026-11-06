@@ -584,7 +584,7 @@ fn channel_filter(input: Value, idx: usize, normalized: bool) -> Value {
             if normalized {
                 Value::Str(format!("{part:.4}"))
             } else {
-                Value::Str(((part * 255.0).round() as u8).to_string())
+                Value::Str(((part * 255.0).round_ties_even() as u8).to_string())
             }
         }
         None => Value::Missing,
@@ -841,6 +841,26 @@ mod tests {
         assert_eq!(eval_to_string("accent | red_n"), "0.5373");
         assert_eq!(eval_to_string("accent | green_n"), "0.7059");
         assert_eq!(eval_to_string("accent | blue_n"), "0.9804");
+    }
+
+    #[test]
+    fn per_channel_filters_round_half_to_even() {
+        let ctx = HashMap::from([(
+            "tie".to_string(),
+            Value::Color(crate::theme::colors::Rgb::opaque(
+                126.5 / 255.0,
+                62.5 / 255.0,
+                190.5 / 255.0,
+            )),
+        )]);
+        let empty = HashMap::new();
+        for (filter, expected) in [("red", "126"), ("green", "62"), ("blue", "190")] {
+            assert_eq!(
+                eval_expr(&format!("tie | {filter}"), &ctx, &empty).display(),
+                expected,
+                "{filter}"
+            );
+        }
     }
 
     #[test]

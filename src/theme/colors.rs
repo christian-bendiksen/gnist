@@ -223,7 +223,7 @@ impl Rgb {
     }
 
     pub fn to_rgb8(self) -> (u8, u8, u8) {
-        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8;
         (to(self.r), to(self.g), to(self.b))
     }
 
@@ -536,7 +536,16 @@ pub fn parse_hex(hex: &str) -> Option<[u8; 3]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_color, parse_ghostty, parse_hex};
+    use super::{Rgb, normalize_color, parse_ghostty, parse_hex};
+
+    #[test]
+    fn colour_channels_round_half_to_even() {
+        let tie = Rgb::opaque(126.5 / 255.0, 62.5 / 255.0, 190.5 / 255.0);
+        assert_eq!(tie.to_rgb8(), (126, 62, 190));
+
+        let mixed = Rgb::from_rgb8(0, 0, 0).mix(Rgb::from_rgb8(253, 253, 253), 0.5);
+        assert_eq!(mixed.to_hex(), "#7e7e7e");
+    }
 
     #[test]
     fn hex_is_preserved_and_lowercased() {
