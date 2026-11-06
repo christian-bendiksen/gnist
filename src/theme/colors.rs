@@ -312,6 +312,15 @@ impl Rgb {
         Self::from_hsl((h + deg).rem_euclid(360.0), s, l).with_alpha(self.a)
     }
 
+    /// Rotate the hue, then pin lightness to .58 (dark) / .42 (light) and
+    /// floor saturation at .45, as the reference's `rotate` does for a theme
+    /// without its own room colours.
+    pub fn ring(self, deg: f32, light: bool) -> Self {
+        let (h, s, _) = self.to_hsl();
+        let l = if light { 0.42 } else { 0.58 };
+        Self::from_hsl((h + deg).rem_euclid(360.0), s.max(0.45), l).with_alpha(self.a)
+    }
+
     pub fn complement(self) -> Self {
         self.adjust_hue(180.0)
     }
