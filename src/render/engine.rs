@@ -332,7 +332,8 @@ fn is_theme_metadata(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_all, render_str};
+    use super::{find_else, render_all, render_str};
+    use crate::render::parser::parse;
     use crate::render::value::Value;
     use std::{collections::HashMap, fs, path::Path};
 
@@ -581,5 +582,37 @@ mod tests {
 
         assert!(out.join("night.dusk.conf").is_file());
         assert!(!out.join("night..conf").exists());
+    }
+
+    #[test]
+    fn find_else_sees_an_else_at_the_first_index_of_its_range() {
+        let tokens = parse("{{else}}");
+        assert_eq!(find_else(&tokens, 0, tokens.len()), Some(0));
+    }
+
+    #[test]
+    fn find_else_sees_an_else_at_the_last_index_of_its_range() {
+        let tokens = parse("{{ accent }}{{else}}");
+        assert_eq!(find_else(&tokens, 0, tokens.len()), Some(1));
+    }
+
+    #[test]
+    fn find_else_skips_a_nested_else_and_finds_the_outer_one() {
+        let tokens = parse(
+            "{{#if mode == \"light\"}}{{#if mode == \"dark\"}}{{else}}inner{{/if}}{{else}}outer{{/if}}",
+        );
+        // 0 open outer, 1 open inner, 2 inner else, 4 close inner,
+        // 5 outer else, 7 close outer. The outer block's range excludes its
+        // own close, so its top-level else is at 5, not the nested one at 2.
+        assert_eq!(find_else(&tokens, 1, 7), Some(5));
+
+        let vars = HashMap::from([("mode".to_string(), Value::Str("dark".into()))]);
+        assert_eq!(
+            render_str(
+                "{{#if mode == \"light\"}}{{#if mode == \"dark\"}}x{{else}}y{{/if}}{{else}}outer{{/if}}",
+                &vars
+            ),
+            "outer"
+        );
     }
 }
