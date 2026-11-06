@@ -179,20 +179,20 @@ fn render_range(
                         }
                         "each" => {
                             let mut inner = String::new();
-                            if let Some((list_expr, item)) = split_each(rest) {
-                                if let Value::List(items) = eval_expr(list_expr, values, overlay) {
-                                    for item_value in items {
-                                        let mut child = overlay.clone();
-                                        child.insert(item.to_owned(), item_value);
-                                        render_range(
-                                            tokens,
-                                            i + 1,
-                                            inner_end,
-                                            values,
-                                            &child,
-                                            &mut inner,
-                                        );
-                                    }
+                            if let Some((list_expr, item)) = split_each(rest)
+                                && let Value::List(items) = eval_expr(list_expr, values, overlay)
+                            {
+                                for item_value in items {
+                                    let mut child = overlay.clone();
+                                    child.insert(item.to_owned(), item_value);
+                                    render_range(
+                                        tokens,
+                                        i + 1,
+                                        inner_end,
+                                        values,
+                                        &child,
+                                        &mut inner,
+                                    );
                                 }
                             }
                             inner
