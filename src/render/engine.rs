@@ -241,8 +241,8 @@ fn find_block_end(tokens: &[Token], open: usize, end: usize) -> usize {
 /// Find the first top-level `{{else}}` inside `[start, end)`.
 fn find_else(tokens: &[Token], start: usize, end: usize) -> Option<usize> {
     let mut depth: usize = 0;
-    for i in start..end {
-        match &tokens[i] {
+    for (i, token) in tokens.iter().enumerate().take(end).skip(start) {
+        match token {
             Token::Block { .. } => depth += 1,
             Token::Close { .. } => depth = depth.saturating_sub(1),
             Token::Else { .. } if depth == 0 => return Some(i),
