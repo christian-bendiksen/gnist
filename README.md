@@ -399,6 +399,19 @@ templates publish them to GTK (`@herda_role1_color` …), to the shell
 (`quickshell.json`) and to the compositor. A theme without them falls back
 to its nearest ANSI colours.
 
+## Testing
+
+`cargo test` runs the unit tests and the CLI tests in `tests/cli.rs`. Every CLI
+test spawns the binary through one guarded builder: it clears the environment,
+gives the child a temporary HOME and XDG tree, points the session and system bus
+addresses at a dead socket inside that tree, leaves `WAYLAND_DISPLAY` and
+`DISPLAY` unset, and puts on PATH only recording stand-ins for `gsettings`,
+`dbus-send`, `pkill`, `touch`, `awww`, `notify-send`, `git` and
+`gtk-update-icon-cache`. The stand-ins write their name and arguments to
+`<tempdir>/stand-in.log` and exit 0, so a test that applies a theme can prove
+exactly what was called without ever reaching a real desktop tool. A source
+check keeps the binary spawn inside that builder.
+
 ## License
 
 Gnist is available under the MIT license.
