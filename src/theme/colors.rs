@@ -612,4 +612,28 @@ mod tests {
         assert_eq!(map["color0"], "#45475a");
         assert_eq!(map["color2"], "#a6e3a1");
     }
+
+    #[test]
+    fn oklab_components_are_pinned() {
+        // Exact f32 bits, not recomputed values: the matrix constants are
+        // written with more digits than f32 can hold, so this pins what they
+        // produce while those literals are shortened to f32's precision.
+        for (hex, expected) in [
+            ("#000000", [0, 0, 0]),
+            ("#ffffff", [1065353216, 0, 864026624]),
+            ("#ff0000", [1059111343, 1046889081, 1040244186]),
+            ("#00ff00", [1063112444, 3194978350, 1043844724]),
+            ("#0000ff", [1055354455, 3171217816, 3198124190]),
+            ("#89b4fa", [1061434400, 3164615008, 3185605912]),
+            ("#1e1e2e", [1048097307, 1005528768, 3169936592]),
+            ("#808080", [1058640162, 855638016, 855638016]),
+        ] {
+            let (l, a, b) = super::Rgb::from_hex(hex).unwrap().to_oklab();
+            assert_eq!(
+                [l.to_bits(), a.to_bits(), b.to_bits()],
+                expected,
+                "{hex} OKLab components changed"
+            );
+        }
+    }
 }
