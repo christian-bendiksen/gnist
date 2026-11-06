@@ -363,3 +363,66 @@ fn scriptable_output_is_never_decorated() {
     assert!(text.contains("DIRECTORY"), "{text}");
     assert!(!text.contains('\x1b'), "{text}");
 }
+
+/// The regression the guard exists for: a `set` that applies must reach the
+/// recording stand-ins, with nothing of the real desktop in its environment.
+#[test]
+fn an_applying_set_only_reaches_the_stand_ins() {
+    let g = Guarded::new();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(
+        themes.join("templates/gtk.css.tpl"),
+        "window { color: {{ accent }}; }\n",
+    )
+    .unwrap();
+
+    let set = g.run(&["set", "dusk"]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let calls = g.calls().expect("the stand-ins record every call");
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface color-scheme prefer-dark"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface gtk-theme adw-gtk3-dark"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains(
+            "dbus-send --session --type=signal /org/gnist/Appearance1 \
+             org.gnist.Appearance1.Changed"
+        ),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("notify-send No wallpaper found for theme 'dusk' -t 2000"),
+        "{calls}"
+    );
+    for line in calls.lines() {
+        assert!(
+            STAND_INS
+                .iter()
+                .any(|tool| line.starts_with(&format!("{tool} "))),
+            "a tool outside the stand-ins was called: {line}"
+        );
+    }
+}
+
+#[test]
+fn only_the_guarded_builder_spawns_the_binary() {
+    let source = include_str!("cli.rs");
+    let needle = ["Command::new(env!(\"", "CARGO_BIN_EXE_gnist", "\"))"].concat();
+    assert_eq!(
+        source.matches(&needle).count(),
+        1,
+        "spawn gnist only through Guarded::run"
+    );
+}
