@@ -666,6 +666,18 @@ fn apply_filter(name: &str, input: Value, args: Vec<Value>) -> Value {
         "darken" => color_amount(input, &args, Rgb::darken),
         "saturate" => color_amount(input, &args, Rgb::saturate),
         "adjust_hue" => color_amount(input, &args, Rgb::adjust_hue),
+        "ring" => {
+            let deg = args.first().and_then(|a| a.as_f64());
+            let light = match args.get(1).map(Value::display).as_deref() {
+                Some("dark") => Some(false),
+                Some("light") => Some(true),
+                _ => None,
+            };
+            match (as_color(&input), deg, light) {
+                (Some(c), Some(deg), Some(light)) => Value::Color(c.ring(deg as f32, light)),
+                _ => Value::Missing,
+            }
+        }
         "alpha" => match (as_color(&input), args.first().and_then(|a| a.as_f64())) {
             (Some(c), Some(a)) => Value::Color(c.with_alpha(a as f32)),
             (Some(c), None) => Value::Float(c.a as f64),
@@ -844,6 +856,46 @@ mod tests {
         assert_eq!(eval_to_string("background | contrast"), "#ffffff");
         assert_eq!(eval_to_string("accent | complement"), "#facf89");
         assert_eq!(eval_to_string("accent | grayscale"), "#727272");
+    }
+
+    #[test]
+    fn ring_matches_the_reference_on_a_theme_without_roles() {
+        // Produced by HANDOVER/08-reference/gnist.py's rotate on aeryn
+        // (accent #818B6B, dark), verbatim; not chosen by hand.
+        let ctx = HashMap::from([
+            ("accent".to_string(), Value::Str("#818b6b".into())),
+            ("mode".to_string(), Value::Str("dark".into())),
+        ]);
+        let empty = HashMap::new();
+        for (deg, expected) in [
+            (0, "#a6c464"),
+            (45, "#64c46a"),
+            (90, "#64c4b2"),
+            (135, "#648ec4"),
+            (180, "#8264c4"),
+            (225, "#c464be"),
+            (270, "#c46476"),
+            (315, "#c49a64"),
+        ] {
+            assert_eq!(
+                eval_expr(&format!("accent | ring {deg} mode"), &ctx, &empty).display(),
+                expected,
+                "ring {deg}"
+            );
+        }
+
+        let light = HashMap::from([
+            ("accent".to_string(), Value::Str("#818b6b".into())),
+            ("mode".to_string(), Value::Str("light".into())),
+        ]);
+        assert_eq!(
+            eval_expr("accent | ring 0 mode", &light, &empty).display(),
+            "#7d9b3b"
+        );
+        assert!(
+            eval_expr("accent | ring 45 sideways", &ctx, &empty).is_missing(),
+            "an unknown mode must leave the placeholder visible"
+        );
     }
 
     #[test]
