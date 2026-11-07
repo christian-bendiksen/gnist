@@ -1,7 +1,7 @@
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output},
 };
 
@@ -416,13 +416,41 @@ fn an_applying_set_only_reaches_the_stand_ins() {
     }
 }
 
+fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
 #[test]
 fn only_the_guarded_builder_spawns_the_binary() {
-    let source = include_str!("cli.rs");
-    let needle = ["Command::new(env!(\"", "CARGO_BIN_EXE_gnist", "\"))"].concat();
-    assert_eq!(
-        source.matches(&needle).count(),
-        1,
-        "spawn gnist only through Guarded::run"
-    );
+    // The token is built from pieces so this scan does not match itself.
+    let token = ["CARGO_BIN_EXE_", "gnist"].concat();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let builder = root.join("tests/cli.rs");
+    let mut files = Vec::new();
+    rust_files(&root.join("tests"), &mut files);
+    rust_files(&root.join("src"), &mut files);
+    for path in files {
+        let source = fs::read_to_string(&path).unwrap();
+        let count = source.matches(&token).count();
+        if path == builder {
+            assert_eq!(count, 1, "spawn gnist only through Guarded::run: {path:?}");
+        } else {
+            assert_eq!(
+                count,
+                0,
+                "{} names the gnist binary path directly; use Guarded::run",
+                path.display()
+            );
+        }
+    }
 }
