@@ -223,7 +223,7 @@ impl Rgb {
     }
 
     pub fn to_rgb8(self) -> (u8, u8, u8) {
-        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8;
         (to(self.r), to(self.g), to(self.b))
     }
 
@@ -310,6 +310,15 @@ impl Rgb {
     pub fn adjust_hue(self, deg: f32) -> Self {
         let (h, s, l) = self.to_hsl();
         Self::from_hsl((h + deg).rem_euclid(360.0), s, l).with_alpha(self.a)
+    }
+
+    /// Rotate the hue, then pin lightness to .58 (dark) / .42 (light) and
+    /// floor saturation at .45, as the reference's `rotate` does for a theme
+    /// without its own room colours.
+    pub fn ring(self, deg: f32, light: bool) -> Self {
+        let (h, s, _) = self.to_hsl();
+        let l = if light { 0.42 } else { 0.58 };
+        Self::from_hsl((h + deg).rem_euclid(360.0), s.max(0.45), l).with_alpha(self.a)
     }
 
     pub fn complement(self) -> Self {
@@ -527,7 +536,16 @@ pub fn parse_hex(hex: &str) -> Option<[u8; 3]> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_color, parse_ghostty, parse_hex};
+    use super::{Rgb, normalize_color, parse_ghostty, parse_hex};
+
+    #[test]
+    fn colour_channels_round_half_to_even() {
+        let tie = Rgb::opaque(126.5 / 255.0, 62.5 / 255.0, 190.5 / 255.0);
+        assert_eq!(tie.to_rgb8(), (126, 62, 190));
+
+        let mixed = Rgb::from_rgb8(0, 0, 0).mix(Rgb::from_rgb8(253, 253, 253), 0.5);
+        assert_eq!(mixed.to_hex(), "#7e7e7e");
+    }
 
     #[test]
     fn hex_is_preserved_and_lowercased() {

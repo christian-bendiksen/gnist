@@ -165,6 +165,8 @@ Color helpers derive new colors from a single palette:
 
 Color helpers: `hex`, `rgb`, `rgba`, `hsl`, `oklab`, `strip`, `lighten`,
 `darken`, `mix OTHER AMOUNT`, `alpha`, `saturate`, `adjust_hue DEGREES`,
+`ring DEGREES MODE` (rotate, then light .58 dark / .42 light and saturation at
+least .45, as a theme's room ring falls back),
 `invert`, `complement`, `grayscale`, `contrast`, `luminance`, `red`, `green`,
 `blue` (0-255 channels) and `red_n`, `green_n`, `blue_n` (0..1, for COSMIC).
 
