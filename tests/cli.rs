@@ -74,6 +74,7 @@ impl Guarded {
             .env("TERM", "xterm-256color")
             .env("LANG", "C")
             .env("LC_ALL", "C")
+            .current_dir(self.dir.path())
             .output()
             .unwrap()
     }
