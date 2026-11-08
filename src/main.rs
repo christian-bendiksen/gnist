@@ -274,8 +274,15 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
 
     // Settings must be published before the change signal reaches already
     // running GTK clients; otherwise a reload can race the new preferences.
-    if !flags.skip_gnome {
-        apply::gnome::run(ctx, theme, flags.skip_icons)?;
+    if !flags.skip_gnome
+        && let Err(error) = apply::gnome::run(ctx, theme, flags.skip_icons)
+    {
+        // The theme is already published. Keep its CSS signal and remaining
+        // integrations moving, but make the missing platform settings visible.
+        eprintln!(
+            "{}",
+            output::warn(&format!("accessibility settings failed: {error:#}"))
+        );
     }
 
     if let Err(e) = apply::gtk_css::emit_current(ctx, Some(theme)) {

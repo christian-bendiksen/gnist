@@ -547,6 +547,11 @@ fn accessibility_preserves_custom_theme_targets_and_reports_failed_settings() {
     let themes = config.join("gnist/themes");
     fs::create_dir_all(themes.join("templates")).unwrap();
     fs::write(
+        themes.join("templates/gtk.css.tpl"),
+        "window { color: #000; }\n",
+    )
+    .unwrap();
+    fs::write(
         themes.join("data/dusk/gnome.toml"),
         "schema = 'org.example.Theme'\ngtk_theme_key = 'theme'\n",
     )
@@ -580,12 +585,24 @@ fn accessibility_preserves_custom_theme_targets_and_reports_failed_settings() {
     );
 
     write_executable(&g.bin.join("gsettings"), "#!/bin/sh\nexit 2\n");
+    fs::write(&g.log, "").unwrap();
     let failed = g.run(&flags);
     assert!(
-        !failed.status.success(),
-        "settings failure was silently ignored"
+        failed.status.success(),
+        "settings failure blocked the published theme"
     );
     assert!(String::from_utf8_lossy(&failed.stderr).contains("gsettings failed"));
+    let calls = g.calls().unwrap();
+    assert!(
+        calls.contains("dbus-send --session --type=signal"),
+        "CSS change signal missing: {calls}"
+    );
+    let direct = g.run(&["gnome", "--skip-icons"]);
+    assert!(
+        !direct.status.success(),
+        "direct settings apply lost its failure status"
+    );
+    assert!(String::from_utf8_lossy(&direct.stderr).contains("gsettings failed"));
 
     // The dconf CLI can emit a commit warning while returning success.
     write_executable(
@@ -594,10 +611,12 @@ fn accessibility_preserves_custom_theme_targets_and_reports_failed_settings() {
     );
     let warned = g.run(&flags);
     assert!(
-        !warned.status.success(),
-        "a failed commit warning was ignored"
+        warned.status.success(),
+        "dconf failure blocked the published theme"
     );
     assert!(String::from_utf8_lossy(&warned.stderr).contains("failed to commit changes to dconf"));
+    let direct = g.run(&["gnome", "--skip-icons"]);
+    assert!(!direct.status.success(), "direct dconf failure was ignored");
 
     // dconf may report a successful set and silently discard it. The other
     // required values read back correctly, but the changed contrast does not.
@@ -616,11 +635,20 @@ exit 0
     );
     let dropped = g.run(&flags);
     assert!(
-        !dropped.status.success(),
-        "a silently dropped write was accepted"
+        dropped.status.success(),
+        "dropped setting blocked the published theme"
     );
     assert!(
         String::from_utf8_lossy(&dropped.stderr)
+            .contains("read-back mismatch for org.gnome.desktop.a11y.interface high-contrast")
+    );
+    let direct = g.run(&["gnome", "--skip-icons"]);
+    assert!(
+        !direct.status.success(),
+        "direct silently dropped write was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&direct.stderr)
             .contains("read-back mismatch for org.gnome.desktop.a11y.interface high-contrast")
     );
 }
