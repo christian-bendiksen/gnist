@@ -177,31 +177,126 @@ pub fn run(ctx: &Ctx, theme: &Theme, skip_icons: bool) -> Result<()> {
         required_setting(
             "org.gnome.desktop.interface",
             "enable-animations",
-            &a11y.enable_animations.to_string(),
+            RequiredValue::Bool(a11y.enable_animations),
         )?;
         required_setting(
             "org.gnome.desktop.interface",
             "text-scaling-factor",
-            &a11y.text_scale.to_string(),
+            RequiredValue::Float(a11y.text_scale),
         )?;
         required_setting(
             "org.gnome.desktop.a11y.interface",
             "high-contrast",
-            &a11y.high_contrast.to_string(),
+            RequiredValue::Bool(a11y.high_contrast),
         )?;
-        required_setting("org.gnome.desktop.interface", "gtk-theme", selected_theme)?;
+        required_setting(
+            "org.gnome.desktop.interface",
+            "gtk-theme",
+            RequiredValue::String(selected_theme),
+        )?;
     }
     Ok(())
 }
 
-fn required_setting(schema: &str, key: &str, value: &str) -> Result<()> {
-    let status = Command::new("gsettings")
-        .args(["set", schema, key, value])
+#[derive(Debug)]
+enum RequiredValue<'a> {
+    Bool(bool),
+    Float(f64),
+    String(&'a str),
+}
+
+impl RequiredValue<'_> {
+    fn as_argument(&self) -> String {
+        match self {
+            Self::Bool(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+            Self::String(value) => (*value).to_owned(),
+        }
+    }
+
+    fn matches_output(&self, output: &str) -> bool {
+        let output = output.trim();
+        match self {
+            Self::Bool(expected) => output.parse::<bool>().ok() == Some(*expected),
+            Self::Float(expected) => output.parse::<f64>().ok() == Some(*expected),
+            // gsettings prints strings in GVariant syntax; it uses either
+            // quote and escapes backslashes, quotes and control characters.
+            Self::String(expected) => gvariant_string(output).as_deref() == Some(*expected),
+        }
+    }
+}
+
+fn gvariant_string(output: &str) -> Option<String> {
+    let mut chars = output.chars();
+    let quote = chars.next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let mut decoded = String::new();
+    loop {
+        let c = chars.next()?;
+        if c == quote {
+            return if chars.next().is_none() {
+                Some(decoded)
+            } else {
+                None
+            };
+        }
+        if c == '\\' {
+            decoded.push(match chars.next()? {
+                '\\' => '\\',
+                '\'' => '\'',
+                '"' => '"',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                'b' => '\x08',
+                'f' => '\x0c',
+                _ => return None,
+            });
+        } else {
+            decoded.push(c);
+        }
+    }
+}
+
+fn required_setting(schema: &str, key: &str, value: RequiredValue<'_>) -> Result<()> {
+    let argument = value.as_argument();
+    let write = Command::new("gsettings")
+        .args(["set", schema, key, &argument])
+        // Keep dconf's otherwise localized commit diagnostic recognizable.
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
-        .status()
+        .output()
         .with_context(|| format!("run gsettings for {schema} {key}"))?;
-    if !status.success() {
-        bail!("gsettings failed for {schema} {key}: {status}");
+    let diagnostic = String::from_utf8_lossy(&write.stderr);
+    if !write.status.success() || diagnostic.contains("failed to commit changes to dconf") {
+        bail!(
+            "gsettings failed for {schema} {key}: {}; {}",
+            write.status,
+            diagnostic.trim()
+        );
+    }
+    // dconf can reject a write while gsettings set exits successfully. Read
+    // from a separate process so it cannot return a local optimistic cache.
+    let readback = Command::new("gsettings")
+        .args(["get", schema, key])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("read gsettings for {schema} {key}"))?;
+    if !readback.status.success() {
+        bail!(
+            "gsettings read-back failed for {schema} {key}: {}",
+            readback.status
+        );
+    }
+    let actual = std::str::from_utf8(&readback.stdout)
+        .with_context(|| format!("invalid gsettings read-back for {schema} {key}"))?;
+    if !value.matches_output(actual) {
+        bail!(
+            "gsettings read-back mismatch for {schema} {key}: expected {value:?}, got {:?}",
+            actual.trim()
+        );
     }
     Ok(())
 }
@@ -218,12 +313,25 @@ fn gsettings_set(schema: &str, key: &str, value: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Accessibility, Config};
+    use super::{Accessibility, Config, RequiredValue};
     use crate::render::value::Value;
     use std::{collections::HashMap, fs};
 
     fn values() -> HashMap<String, Value> {
         HashMap::from([("accent".to_string(), Value::Str("#89b4fa".into()))])
+    }
+
+    #[test]
+    fn required_readback_compares_typed_values_and_rejects_malformed_values() {
+        assert!(RequiredValue::Bool(false).matches_output("false\n"));
+        assert!(!RequiredValue::Bool(false).matches_output("true"));
+        assert!(RequiredValue::Float(1.0).matches_output("1.0"));
+        assert!(RequiredValue::Float(1.25).matches_output("1.25"));
+        assert!(!RequiredValue::Float(1.25).matches_output("nan"));
+        assert!(RequiredValue::String("HighContrast").matches_output("'HighContrast'"));
+        assert!(RequiredValue::String("a'b").matches_output("\"a'b\""));
+        assert!(!RequiredValue::String("HighContrast").matches_output("'HighContrast' trailing"));
+        assert!(!RequiredValue::String("HighContrast").matches_output(""));
     }
 
     #[test]

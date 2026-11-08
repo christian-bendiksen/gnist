@@ -46,6 +46,31 @@ impl Guarded {
             write_executable(&bin.join(name), &script);
         }
 
+        // A private in-memory stand-in: required settings are read back by a
+        // separate process, just like gsettings against a real session store.
+        let settings = dir.path().join("fake-settings");
+        fs::create_dir(&settings).unwrap();
+        write_executable(
+            &bin.join("gsettings"),
+            &format!(
+                r##"#!/bin/sh
+printf '%s\n' "gsettings $*" >> '{}'
+file='{}/'$2'.'$3
+case "$1" in
+    set) printf 'unrelated module diagnostic\n' >&2; printf '%s' "$4" > "$file" ;;
+    get) case "$3" in gtk-theme) printf "'%s'\n" "$(cat "$file")" ;; *) cat "$file"; printf '\n' ;; esac ;;
+esac
+"##,
+                log.display(),
+                settings.display()
+            ),
+        );
+        // The guarded PATH holds no host utilities. Provide a tiny cat solely
+        // for this fake settings store.
+        write_executable(
+            &bin.join("cat"),
+            "#!/bin/sh\nwhile IFS= read -r line || [ -n \"$line\" ]; do printf '%s' \"$line\"; done < \"$1\"\n",
+        );
         Self { dir, bin, log }
     }
 
@@ -561,6 +586,43 @@ fn accessibility_preserves_custom_theme_targets_and_reports_failed_settings() {
         "settings failure was silently ignored"
     );
     assert!(String::from_utf8_lossy(&failed.stderr).contains("gsettings failed"));
+
+    // The dconf CLI can emit a commit warning while returning success.
+    write_executable(
+        &g.bin.join("gsettings"),
+        "#!/bin/sh\nprintf 'failed to commit changes to dconf\\n' >&2\nexit 0\n",
+    );
+    let warned = g.run(&flags);
+    assert!(
+        !warned.status.success(),
+        "a failed commit warning was ignored"
+    );
+    assert!(String::from_utf8_lossy(&warned.stderr).contains("failed to commit changes to dconf"));
+
+    // dconf may report a successful set and silently discard it. The other
+    // required values read back correctly, but the changed contrast does not.
+    write_executable(
+        &g.bin.join("gsettings"),
+        r##"#!/bin/sh
+if [ "$1" = get ]; then
+  case "$3" in
+    enable-animations) printf 'false\n' ;;
+    text-scaling-factor) printf '1.25\n' ;;
+    high-contrast) printf 'false\n' ;;
+  esac
+fi
+exit 0
+"##,
+    );
+    let dropped = g.run(&flags);
+    assert!(
+        !dropped.status.success(),
+        "a silently dropped write was accepted"
+    );
+    assert!(
+        String::from_utf8_lossy(&dropped.stderr)
+            .contains("read-back mismatch for org.gnome.desktop.a11y.interface high-contrast")
+    );
 }
 
 #[test]
