@@ -424,6 +424,11 @@ fn accessibility_settings_apply_after_theme_extras_and_restore_the_selected_them
     write_theme(&config, "dusk", "#123456");
     let themes = config.join("gnist/themes");
     fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(
+        themes.join("templates/gtk.css.tpl"),
+        "window { color: #000; }\n",
+    )
+    .unwrap();
     let settings = themes.join("templates/herda-accessibility.toml.tpl");
     fs::write(
         &settings,
@@ -454,12 +459,28 @@ fn accessibility_settings_apply_after_theme_extras_and_restore_the_selected_them
         "{calls}"
     );
     assert!(
+        calls
+            .find("gsettings set org.gnome.desktop.interface enable-animations false")
+            .unwrap()
+            < calls
+                .find("gsettings set org.gnome.desktop.interface gtk-theme HighContrast")
+                .unwrap(),
+        "motion must be disabled before changing the theme: {calls}"
+    );
+    assert!(
         calls.contains("gsettings set org.gnome.desktop.interface text-scaling-factor 1.25"),
         "{calls}"
     );
     assert!(
         calls.contains("gsettings set org.gnome.desktop.a11y.interface high-contrast true"),
         "{calls}"
+    );
+    assert!(
+        calls
+            .find("gsettings set org.gnome.desktop.a11y.interface high-contrast true")
+            .unwrap()
+            < calls.find("dbus-send --session --type=signal").unwrap(),
+        "accessibility settings must precede the change signal: {calls}"
     );
     assert!(
         calls

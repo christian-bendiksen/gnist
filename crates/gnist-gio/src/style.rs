@@ -242,7 +242,7 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
         };
 
         if !signal_path.is_empty() {
-            let candidate = PathBuf::from(signal_path);
+            let candidate = config::css_path_for_gtk(style.gtk, Path::new(signal_path));
             if config::css_path_loadable(&candidate) {
                 if style.path != candidate {
                     ox_log!(
@@ -357,7 +357,11 @@ fn apply_gtk3_mode(mode: Mode) {
     };
 
     let prefer_dark: libc::c_int = prefer_dark.into();
-    let theme = config::gtk3_theme_name(mode);
+    let theme = if config::gtk3_theme_controlled_by_settings() {
+        None
+    } else {
+        config::gtk3_theme_name(mode)
+    };
 
     if let Some(theme) = theme {
         let Ok(theme_c) = CString::new(theme) else {
