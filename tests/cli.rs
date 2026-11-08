@@ -417,6 +417,159 @@ fn an_applying_set_only_reaches_the_stand_ins() {
     }
 }
 
+#[test]
+fn accessibility_settings_apply_after_theme_extras_and_restore_the_selected_theme() {
+    let g = Guarded::new();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    let settings = themes.join("templates/herda-accessibility.toml.tpl");
+    fs::write(
+        &settings,
+        "enable-animations = false\nhigh-contrast = true\ntext-scaling-factor = 1.25\n",
+    )
+    .unwrap();
+    fs::write(
+        themes.join("data/dusk/gnome.toml"),
+        "[[extra]]\nkey = 'enable-animations'\nvalue = 'true'\n",
+    )
+    .unwrap();
+    let flags = [
+        "set",
+        "dusk",
+        "--skip-reload",
+        "--skip-icons",
+        "--skip-wallpaper",
+    ];
+    let set = g.run(&flags);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let calls = g.calls().unwrap();
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface gtk-theme HighContrast"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface text-scaling-factor 1.25"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.a11y.interface high-contrast true"),
+        "{calls}"
+    );
+    assert!(
+        calls
+            .rfind("gsettings set org.gnome.desktop.interface enable-animations false")
+            .unwrap()
+            > calls
+                .rfind("gsettings set org.gnome.desktop.interface enable-animations true")
+                .unwrap(),
+        "{calls}"
+    );
+
+    fs::write(
+        &settings,
+        "enable-animations = true\nhigh-contrast = false\ntext-scaling-factor = 1.0\n",
+    )
+    .unwrap();
+    let set = g.run(&flags);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let calls = g.calls().unwrap();
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface gtk-theme adw-gtk3-dark"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.a11y.interface high-contrast false"),
+        "{calls}"
+    );
+}
+
+#[test]
+fn accessibility_preserves_custom_theme_targets_and_reports_failed_settings() {
+    let g = Guarded::new();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(
+        themes.join("data/dusk/gnome.toml"),
+        "schema = 'org.example.Theme'\ngtk_theme_key = 'theme'\n",
+    )
+    .unwrap();
+    fs::write(
+        themes.join("templates/herda-accessibility.toml.tpl"),
+        "enable-animations = false\nhigh-contrast = true\ntext-scaling-factor = 1.25\n",
+    )
+    .unwrap();
+    let flags = [
+        "set",
+        "dusk",
+        "--skip-reload",
+        "--skip-icons",
+        "--skip-wallpaper",
+    ];
+    let set = g.run(&flags);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let calls = g.calls().unwrap();
+    assert!(
+        calls.contains("gsettings set org.example.Theme theme adw-gtk3-dark"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("gsettings set org.gnome.desktop.interface gtk-theme HighContrast"),
+        "{calls}"
+    );
+
+    write_executable(&g.bin.join("gsettings"), "#!/bin/sh\nexit 2\n");
+    let failed = g.run(&flags);
+    assert!(
+        !failed.status.success(),
+        "settings failure was silently ignored"
+    );
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("gsettings failed"));
+}
+
+#[test]
+fn skipped_gnome_never_writes_accessibility_settings() {
+    let g = Guarded::new();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let templates = config.join("gnist/themes/templates");
+    fs::create_dir_all(&templates).unwrap();
+    fs::write(
+        templates.join("herda-accessibility.toml.tpl"),
+        "enable-animations = false\nhigh-contrast = true\ntext-scaling-factor = 1.25\n",
+    )
+    .unwrap();
+    let set = g.run(&[
+        "set",
+        "dusk",
+        "--skip-gnome",
+        "--skip-reload",
+        "--skip-icons",
+        "--skip-wallpaper",
+    ]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert!(!g.calls().unwrap_or_default().contains("gsettings "));
+}
+
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;

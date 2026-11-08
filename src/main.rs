@@ -150,7 +150,7 @@ fn main() -> Result<()> {
         }
         Cmd::Gnome { skip_icons } => {
             let theme = Theme::load_current(&ctx)?;
-            apply::gnome::run(&theme, skip_icons);
+            apply::gnome::run(&ctx, &theme, skip_icons)?;
             Ok(())
         }
         Cmd::Wallpaper { image } => match image {
@@ -277,7 +277,7 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     }
 
     if !flags.skip_gnome {
-        apply::gnome::run(theme, flags.skip_icons);
+        apply::gnome::run(ctx, theme, flags.skip_icons)?;
     }
 
     if !flags.skip_reload {
