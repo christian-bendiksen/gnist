@@ -172,7 +172,8 @@ pub fn run(ctx: &Ctx, theme: &Theme, skip_icons: bool) -> Result<()> {
         } else {
             gtk_theme
         };
-        required_setting("org.gnome.desktop.interface", "gtk-theme", selected_theme)?;
+        // Turn motion off before changing the theme so the transition itself
+        // does not animate when both preferences change together.
         required_setting(
             "org.gnome.desktop.interface",
             "enable-animations",
@@ -188,6 +189,7 @@ pub fn run(ctx: &Ctx, theme: &Theme, skip_icons: bool) -> Result<()> {
             "high-contrast",
             &a11y.high_contrast.to_string(),
         )?;
+        required_setting("org.gnome.desktop.interface", "gtk-theme", selected_theme)?;
     }
     Ok(())
 }

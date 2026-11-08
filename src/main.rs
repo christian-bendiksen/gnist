@@ -272,12 +272,14 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     // the Gnist GIO module.
     apply::gtk_css::refresh_user_css_links(ctx);
 
-    if let Err(e) = apply::gtk_css::emit_current(ctx, Some(theme)) {
-        eprintln!("{}", output::warn(&format!("gtk-css reload failed: {e:#}")));
-    }
-
+    // Settings must be published before the change signal reaches already
+    // running GTK clients; otherwise a reload can race the new preferences.
     if !flags.skip_gnome {
         apply::gnome::run(ctx, theme, flags.skip_icons)?;
+    }
+
+    if let Err(e) = apply::gtk_css::emit_current(ctx, Some(theme)) {
+        eprintln!("{}", output::warn(&format!("gtk-css reload failed: {e:#}")));
     }
 
     if !flags.skip_reload {

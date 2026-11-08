@@ -144,7 +144,7 @@ pub fn gtk3_theme_name(mode: Mode) -> Option<&'static str> {
 
 pub fn default_css_path(gtk: GtkApi) -> PathBuf {
     let config_home = config_home();
-    let current = config_home.join("gnist/themes/current/gtk.css");
+    let current = css_path_for_gtk(gtk, &config_home.join("gnist/themes/current/gtk.css"));
     if css_path_loadable(&current) {
         return current;
     }
@@ -155,6 +155,30 @@ pub fn default_css_path(gtk: GtkApi) -> PathBuf {
     }
 
     current
+}
+
+/// The appearance signal names GTK4's CSS; a GTK3 client needs the sibling
+/// generated for its parser when one exists.
+pub fn css_path_for_gtk(gtk: GtkApi, path: &Path) -> PathBuf {
+    if gtk.is_gtk3() && path.file_name().is_some_and(|name| name == "gtk.css") {
+        let gtk3 = path.with_file_name("gtk3.css");
+        if css_path_loadable(&gtk3) {
+            return gtk3;
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Gnist's accessibility settings own the GTK3 theme through GSettings.
+/// Avoid overriding HighContrast, including when a refresh arrives mid-change.
+pub fn gtk3_theme_controlled_by_settings() -> bool {
+    gtk3_theme_controlled_at(&config_home())
+}
+
+fn gtk3_theme_controlled_at(config_home: &Path) -> bool {
+    config_home
+        .join("gnist/themes/current/herda-accessibility.toml")
+        .is_file()
 }
 
 pub fn css_path_loadable(path: impl AsRef<Path>) -> bool {
@@ -184,4 +208,41 @@ fn env_or(name: &str, default: &str) -> String {
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| default.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GtkApi, css_path_for_gtk, gtk3_theme_controlled_at};
+    use std::fs;
+
+    #[test]
+    fn gtk3_uses_its_css_sibling_and_other_paths_remain_unchanged() {
+        let root = std::env::temp_dir().join(format!("gnist-gio-css-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let gtk4 = root.join("gtk.css");
+        let gtk3 = root.join("gtk3.css");
+        fs::write(&gtk4, "gtk4").unwrap();
+        assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &gtk4), gtk4);
+        fs::write(&gtk3, "gtk3").unwrap();
+        assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &gtk4), gtk3);
+        assert_eq!(css_path_for_gtk(GtkApi::Gtk4, &gtk4), gtk4);
+        let custom = root.join("custom.css");
+        assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &custom), custom);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn accessibility_file_selects_the_session_theme_authority() {
+        let root = std::env::temp_dir().join(format!("gnist-gio-theme-{}", std::process::id()));
+        let current = root.join("gnist/themes/current");
+        fs::create_dir_all(&current).unwrap();
+        assert!(!gtk3_theme_controlled_at(&root));
+        fs::write(
+            current.join("herda-accessibility.toml"),
+            "high-contrast = true\n",
+        )
+        .unwrap();
+        assert!(gtk3_theme_controlled_at(&root));
+        fs::remove_dir_all(root).unwrap();
+    }
 }
