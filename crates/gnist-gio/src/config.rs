@@ -143,7 +143,14 @@ pub fn gtk3_theme_name(mode: Mode) -> Option<&'static str> {
 }
 
 pub fn default_css_path(gtk: GtkApi) -> PathBuf {
-    let config_home = config_home();
+    default_css_path_in(gtk, &config_home())
+}
+
+/// Gnist's published sheet for this GTK, else the legacy per-version file.
+/// GTK 3 is never given the GTK 4 sheet: it cannot parse `:root`, `@media`
+/// or `color-mix()`, and every GTK 3 program would log theme errors and
+/// lose the rules after the first one it rejects.
+fn default_css_path_in(gtk: GtkApi, config_home: &Path) -> PathBuf {
     let current = css_path_for_gtk(gtk, &config_home.join("gnist/themes/current/gtk.css"));
     if css_path_loadable(&current) {
         return current;
@@ -157,14 +164,13 @@ pub fn default_css_path(gtk: GtkApi) -> PathBuf {
     current
 }
 
-/// The appearance signal names GTK4's CSS; a GTK3 client needs the sibling
-/// generated for its parser when one exists.
+/// The appearance signal names GTK4's CSS; a GTK3 client gets the sibling
+/// generated for its parser, `gtk3.css`, whether or not it exists yet:
+/// callers load only a loadable path, so a missing sibling loads nothing
+/// rather than the GTK 4 sheet.
 pub fn css_path_for_gtk(gtk: GtkApi, path: &Path) -> PathBuf {
     if gtk.is_gtk3() && path.file_name().is_some_and(|name| name == "gtk.css") {
-        let gtk3 = path.with_file_name("gtk3.css");
-        if css_path_loadable(&gtk3) {
-            return gtk3;
-        }
+        return path.with_file_name("gtk3.css");
     }
     path.to_path_buf()
 }
@@ -222,12 +228,48 @@ mod tests {
         let gtk4 = root.join("gtk.css");
         let gtk3 = root.join("gtk3.css");
         fs::write(&gtk4, "gtk4").unwrap();
-        assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &gtk4), gtk4);
+        // Without its sibling GTK 3 gets a path that loads nothing, never
+        // the GTK 4 sheet.
+        assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &gtk4), gtk3);
+        assert!(!super::css_path_loadable(css_path_for_gtk(
+            GtkApi::Gtk3,
+            &gtk4
+        )));
         fs::write(&gtk3, "gtk3").unwrap();
         assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &gtk4), gtk3);
         assert_eq!(css_path_for_gtk(GtkApi::Gtk4, &gtk4), gtk4);
         let custom = root.join("custom.css");
         assert_eq!(css_path_for_gtk(GtkApi::Gtk3, &custom), custom);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gtk3_never_defaults_to_the_gtk4_sheet() {
+        let root = std::env::temp_dir().join(format!("gnist-gio-default-{}", std::process::id()));
+        let current = root.join("gnist/themes/current");
+        fs::create_dir_all(&current).unwrap();
+        fs::write(current.join("gtk.css"), ":root { --x: 1px; }").unwrap();
+        // Only the GTK 4 sheet is published: GTK 4 loads it, GTK 3 nothing.
+        assert_eq!(
+            super::default_css_path_in(GtkApi::Gtk4, &root),
+            current.join("gtk.css")
+        );
+        let gtk3 = super::default_css_path_in(GtkApi::Gtk3, &root);
+        assert_ne!(gtk3, current.join("gtk.css"));
+        assert!(!super::css_path_loadable(&gtk3));
+        // The legacy per-version file is GTK 3's next choice, as before.
+        fs::create_dir_all(root.join("gtk-3.0")).unwrap();
+        fs::write(root.join("gtk-3.0/gtk.css"), "@define-color x #000;").unwrap();
+        assert_eq!(
+            super::default_css_path_in(GtkApi::Gtk3, &root),
+            root.join("gtk-3.0/gtk.css")
+        );
+        // Its own sheet, once published, wins over the legacy file.
+        fs::write(current.join("gtk3.css"), "@define-color x #000;").unwrap();
+        assert_eq!(
+            super::default_css_path_in(GtkApi::Gtk3, &root),
+            current.join("gtk3.css")
+        );
         fs::remove_dir_all(root).unwrap();
     }
 
