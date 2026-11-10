@@ -151,13 +151,23 @@ pub fn default_css_path(gtk: GtkApi) -> PathBuf {
 /// or `color-mix()`, and every GTK 3 program would log theme errors and
 /// lose the rules after the first one it rejects.
 fn default_css_path_in(gtk: GtkApi, config_home: &Path) -> PathBuf {
-    let current = css_path_for_gtk(gtk, &config_home.join("gnist/themes/current/gtk.css"));
+    let gtk4 = config_home.join("gnist/themes/current/gtk.css");
+    let current = css_path_for_gtk(gtk, &gtk4);
     if css_path_loadable(&current) {
         return current;
     }
 
     let legacy = config_home.join(format!("gtk-{}.0/gtk.css", gtk.major()));
     if css_path_loadable(&legacy) {
+        // Older Gnist versions linked GTK 3's user CSS to the GTK 4 sheet.
+        // Keep independent legacy GTK 3 CSS, but never load that old link.
+        if gtk.is_gtk3()
+            && let (Ok(legacy_target), Ok(gtk4_target)) =
+                (std::fs::canonicalize(&legacy), std::fs::canonicalize(&gtk4))
+            && legacy_target == gtk4_target
+        {
+            return current;
+        }
         return legacy;
     }
 
@@ -270,6 +280,39 @@ mod tests {
             super::default_css_path_in(GtkApi::Gtk3, &root),
             current.join("gtk3.css")
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn gtk3_rejects_legacy_links_to_the_gtk4_sheet() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("gnist-gio-legacy-{}", std::process::id()));
+        let current = root.join("gnist/themes/current");
+        let legacy = root.join("gtk-3.0/gtk.css");
+        fs::create_dir_all(&current).unwrap();
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(current.join("gtk.css"), ":root { --x: 1px; }").unwrap();
+        // Gnist used to create this link whenever gtk3.css was absent.
+        // Check absolute and relative spellings of the same GTK 4 sheet.
+        for target in [
+            current.join("gtk.css"),
+            std::path::PathBuf::from("../gnist/themes/current/gtk.css"),
+        ] {
+            symlink(target, &legacy).unwrap();
+            let selected = super::default_css_path_in(GtkApi::Gtk3, &root);
+            assert!(
+                !super::css_path_loadable(&selected),
+                "GTK 3 was given the GTK 4 sheet through {}",
+                selected.display()
+            );
+            fs::remove_file(&legacy).unwrap();
+        }
+        // A person's independent GTK 3 stylesheet still works through a link.
+        let custom = root.join("custom-gtk3.css");
+        fs::write(&custom, "@define-color x #000;").unwrap();
+        symlink(custom, &legacy).unwrap();
+        assert_eq!(super::default_css_path_in(GtkApi::Gtk3, &root), legacy);
         fs::remove_dir_all(root).unwrap();
     }
 
