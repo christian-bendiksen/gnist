@@ -36,17 +36,12 @@ pub fn refresh_user_css_links(ctx: &Ctx) {
 /// Each GTK version's user CSS directory and the published file it links to.
 ///
 /// GTK 4 reads `gtk.css`. GTK 3 cannot parse what GTK 4 and libadwaita do
-/// (`color-mix()`, `@media`, `:root`), so a theme that publishes a `gtk3.css`
-/// gives GTK 3 that file; without one, GTK 3 reads `gtk.css` as before.
+/// (`color-mix()`, `@media`, `:root`), so it always links to `gtk3.css`.
+/// When that sheet is absent the link is inactive. Refresh still replaces old
+/// links to GTK 4 CSS, and a later publication can activate GTK 3's own sheet.
 pub fn user_css_links(config_home: &Path, current: &Path) -> [(PathBuf, PathBuf); 2] {
-    let gtk3 = current.join("gtk3.css");
-    let gtk3 = if gtk3.is_file() {
-        gtk3
-    } else {
-        current.join("gtk.css")
-    };
     [
-        (config_home.join("gtk-3.0"), gtk3),
+        (config_home.join("gtk-3.0"), current.join("gtk3.css")),
         (config_home.join("gtk-4.0"), current.join("gtk.css")),
     ]
 }
@@ -130,10 +125,50 @@ mod tests {
         fs::write(current.join("gtk.css"), "").unwrap();
         let home = dir.path().join("config");
         let links = user_css_links(&home, &current);
-        assert_eq!(links[0], (home.join("gtk-3.0"), current.join("gtk.css")));
+        assert_eq!(links[0], (home.join("gtk-3.0"), current.join("gtk3.css")));
+        assert!(!links[0].1.is_file());
         fs::write(current.join("gtk3.css"), "").unwrap();
         let links = user_css_links(&home, &current);
         assert_eq!(links[0], (home.join("gtk-3.0"), current.join("gtk3.css")));
         assert_eq!(links[1], (home.join("gtk-4.0"), current.join("gtk.css")));
+    }
+
+    #[test]
+    fn refresh_replaces_old_gtk4_links_and_tracks_missing_gtk3_css() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Ctx::from_xdg(dir.path(), None, None, None);
+        fs::create_dir_all(&ctx.current_link).unwrap();
+        fs::create_dir_all(ctx.config_home.join("gtk-3.0")).unwrap();
+        fs::create_dir_all(ctx.config_home.join("gtk-4.0")).unwrap();
+        let gtk3 = ctx.current_link.join("gtk3.css");
+        let gtk4 = ctx.current_link.join("gtk.css");
+        let legacy = ctx.config_home.join("gtk-3.0/gtk.css");
+        fs::write(&gtk4, ":root { --x: 1px; }").unwrap();
+        symlink(&gtk4, &legacy).unwrap();
+
+        refresh_user_css_links(&ctx);
+        assert_eq!(fs::read_link(&legacy).unwrap(), gtk3);
+        assert!(!legacy.is_file());
+        let gtk4_user = ctx.config_home.join("gtk-4.0/gtk.css");
+        assert_eq!(fs::read_link(&gtk4_user).unwrap(), gtk4);
+        assert!(gtk4_user.is_file());
+
+        fs::write(&gtk3, "@define-color x #000;").unwrap();
+        refresh_user_css_links(&ctx);
+        assert_eq!(
+            fs::read_to_string(&legacy).unwrap(),
+            "@define-color x #000;"
+        );
+
+        fs::remove_file(&gtk3).unwrap();
+        refresh_user_css_links(&ctx);
+        assert_eq!(fs::read_link(&legacy).unwrap(), gtk3);
+        assert!(!legacy.is_file());
+        assert_eq!(
+            fs::read_to_string(gtk4_user).unwrap(),
+            ":root { --x: 1px; }"
+        );
     }
 }
