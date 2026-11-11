@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use herda_ui::document::Row;
 use herda_ui::ink::Ink;
@@ -51,6 +51,13 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ModeArg {
+    Light,
+    Dark,
+    Toggle,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Create the Gnist theme directories
@@ -59,6 +66,18 @@ enum Cmd {
     /// Render and apply an installed theme
     Set {
         theme: String,
+        #[command(flatten)]
+        integrations: IntegrationOptions,
+        #[arg(long)]
+        skip_wallpaper: bool,
+    },
+
+    /// Switch the current theme to its light or dark counterpart
+    ///
+    /// The counterpart is the theme's `light_theme` / `dark_theme` key in
+    /// colors.toml, else `<name>-light` / the name without `-light`.
+    Mode {
+        mode: ModeArg,
         #[command(flatten)]
         integrations: IntegrationOptions,
         #[arg(long)]
@@ -126,6 +145,11 @@ fn main() -> Result<()> {
             integrations,
             skip_wallpaper,
         } => cmd_set(&ctx, &theme, integrations.apply_flags(skip_wallpaper)),
+        Cmd::Mode {
+            mode,
+            integrations,
+            skip_wallpaper,
+        } => cmd_mode(&ctx, mode, integrations.apply_flags(skip_wallpaper)),
         Cmd::Reapply {
             integrations,
             wallpaper,
@@ -168,6 +192,7 @@ const fn command_title(command: &Cmd) -> &'static str {
     match command {
         Cmd::Init => "Prepare the theme directories",
         Cmd::Set { .. } => "Switch theme",
+        Cmd::Mode { .. } => "Switch between light and dark",
         Cmd::Reapply { .. } => "Reapply the active theme",
         Cmd::List => "Installed themes",
         Cmd::Inspect { .. } => "Theme palettes",
@@ -231,8 +256,12 @@ fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> 
     publish_theme(ctx, &theme)?;
 
     // The selected theme is persistent state, not part of the rendered tree.
-    std::fs::write(&ctx.current_theme_file, format!("{}\n", theme.name))
-        .context("write current.theme")?;
+    // Written whole and renamed into place, so a reader never sees half.
+    write_atomic(
+        &ctx.current_theme_file,
+        format!("{}\n", theme.name).as_bytes(),
+    )
+    .context("write current.theme")?;
 
     apply_theme(ctx, &theme, flags)
 }
@@ -511,6 +540,69 @@ fn list_installed(data_dir: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+fn write_atomic(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("gnist.tmp");
+    std::fs::write(&tmp, contents).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))
+}
+
+/// The light or dark counterpart of `theme`: its `light_theme` /
+/// `dark_theme` key, else `<name>-light` / the name without `-light`.
+/// The counterpart must exist and be of the wanted mode.
+fn counterpart(ctx: &Ctx, theme: &Theme, want_light: bool) -> Result<String> {
+    let key = if want_light {
+        "light_theme"
+    } else {
+        "dark_theme"
+    };
+    let name = match theme.vars.get(key) {
+        Some(render::value::Value::Str(name)) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ if want_light => format!("{}-light", theme.name),
+        _ => match theme.name.strip_suffix("-light") {
+            Some(base) => base.to_owned(),
+            None => bail!(
+                "theme '{}' names no dark counterpart (set {key} in its colors.toml)",
+                theme.name
+            ),
+        },
+    };
+    let other = Theme::load(ctx, &name).with_context(|| {
+        format!(
+            "theme '{}' has no {} counterpart '{name}' (set {key} in its colors.toml)",
+            theme.name,
+            if want_light { "light" } else { "dark" }
+        )
+    })?;
+    if other.is_light != want_light {
+        bail!(
+            "'{name}', the counterpart of '{}', is not a {} theme",
+            theme.name,
+            if want_light { "light" } else { "dark" }
+        );
+    }
+    Ok(name)
+}
+
+fn cmd_mode(ctx: &Ctx, mode: ModeArg, flags: apply::ApplyFlags) -> Result<()> {
+    let current = read_current_name(ctx).context("no current theme: run `gnist set` first")?;
+    let theme =
+        Theme::load(ctx, &current).with_context(|| format!("load current theme '{current}'"))?;
+    let want_light = match mode {
+        ModeArg::Light => true,
+        ModeArg::Dark => false,
+        ModeArg::Toggle => !theme.is_light,
+    };
+    if want_light == theme.is_light {
+        println!(
+            "{current} is already {}",
+            if want_light { "light" } else { "dark" }
+        );
+        return Ok(());
+    }
+    let target = counterpart(ctx, &theme, want_light)?;
+    cmd_set(ctx, &target, flags)
+}
+
 fn read_current_name(ctx: &Ctx) -> Option<String> {
     let raw = std::fs::read_to_string(&ctx.current_theme_file).ok()?;
     let trimmed = raw.trim();
@@ -519,7 +611,10 @@ fn read_current_name(ctx: &Ctx) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Cmd, cmd_reapply, cmd_remove, cmd_set, cmd_update, read_current_name};
+    use super::{
+        Cli, Cmd, ModeArg, cmd_mode, cmd_reapply, cmd_remove, cmd_set, cmd_update,
+        read_current_name,
+    };
     use crate::{apply::ApplyFlags, ctx::Ctx, theme::Theme};
     use clap::Parser;
     use std::{ffi::OsStr, fs};
@@ -551,6 +646,110 @@ mod tests {
             skip_wallpaper: true,
             ..ApplyFlags::default()
         }
+    }
+
+    fn mode_ctx(dir: &tempfile::TempDir) -> Ctx {
+        let ctx = test_ctx(dir);
+        let data_root = &ctx.source_roots[1];
+        fs::create_dir_all(data_root.join("templates")).unwrap();
+        fs::write(
+            data_root.join("templates/app.conf.tpl"),
+            "mode={{ mode }}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(ctx.current_theme_file.parent().unwrap()).unwrap();
+        ctx
+    }
+
+    fn write_mode_theme(ctx: &Ctx, name: &str, light: bool, extra: &str) {
+        let theme = ctx.source_roots[1].join("data").join(name);
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(
+            theme.join("colors.toml"),
+            format!("accent = \"#123456\"\n{extra}"),
+        )
+        .unwrap();
+        if light {
+            fs::write(theme.join("light.mode"), "").unwrap();
+        }
+    }
+
+    #[test]
+    fn mode_parses_light_dark_and_toggle() {
+        for (word, mode) in [
+            ("light", ModeArg::Light),
+            ("dark", ModeArg::Dark),
+            ("toggle", ModeArg::Toggle),
+        ] {
+            let cli = Cli::try_parse_from(["gnist", "mode", word]).unwrap();
+            let Cmd::Mode { mode: parsed, .. } = cli.cmd else {
+                panic!("not mode")
+            };
+            assert_eq!(parsed, mode);
+        }
+        assert!(Cli::try_parse_from(["gnist", "mode", "sepia"]).is_err());
+    }
+
+    #[test]
+    fn mode_switches_by_name_rule_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "herda", false, "");
+        write_mode_theme(&ctx, "herda-light", true, "");
+        cmd_set(&ctx, "herda", skip_apply()).unwrap();
+
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=light\n"
+        );
+
+        // Already light: nothing changes.
+        cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+
+        cmd_mode(&ctx, ModeArg::Dark, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=dark\n"
+        );
+        assert!(!ctx.current_theme_file.with_extension("gnist.tmp").exists());
+    }
+
+    #[test]
+    fn mode_follows_an_explicit_pair_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "night", false, "light_theme = \"day\"\n");
+        write_mode_theme(&ctx, "day", true, "dark_theme = \"night\"\n");
+        cmd_set(&ctx, "night", skip_apply()).unwrap();
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("day"));
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("night"));
+    }
+
+    #[test]
+    fn mode_refuses_a_missing_or_wrong_counterpart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "lonely", false, "");
+        write_mode_theme(&ctx, "odd", false, "light_theme = \"lonely\"\n");
+        cmd_set(&ctx, "lonely", skip_apply()).unwrap();
+        let error = cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no light counterpart"),
+            "{error:#}"
+        );
+        cmd_set(&ctx, "odd", skip_apply()).unwrap();
+        let error = cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not a light theme"),
+            "{error:#}"
+        );
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("odd"));
     }
 
     #[test]
