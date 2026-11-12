@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use herda_ui::document::Row;
 use herda_ui::ink::Ink;
@@ -51,6 +51,13 @@ struct Cli {
     cmd: Cmd,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+enum ModeArg {
+    Light,
+    Dark,
+    Toggle,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Create the Gnist theme directories
@@ -59,6 +66,18 @@ enum Cmd {
     /// Render and apply an installed theme
     Set {
         theme: String,
+        #[command(flatten)]
+        integrations: IntegrationOptions,
+        #[arg(long)]
+        skip_wallpaper: bool,
+    },
+
+    /// Switch the current theme to its light or dark counterpart
+    ///
+    /// The counterpart is the theme's `light_theme` / `dark_theme` key in
+    /// colors.toml, else `<name>-light` / the name without `-light`.
+    Mode {
+        mode: ModeArg,
         #[command(flatten)]
         integrations: IntegrationOptions,
         #[arg(long)]
@@ -114,7 +133,48 @@ enum Cmd {
     Wallpaper { image: Option<PathBuf> },
 }
 
-fn main() -> Result<()> {
+/// Another gnist holds the theme lock past the limit. `gnist` exits 75
+/// (EX_TEMPFAIL) for it, so a caller such as smia-session can keep the theme
+/// as it is and carry on instead of failing the session.
+#[derive(Debug)]
+struct ThemesBusy {
+    path: PathBuf,
+    waited: std::time::Duration,
+}
+
+impl std::fmt::Display for ThemesBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "another gnist has been switching the theme for {:.0} s and still holds {}; \
+             try again, or end that gnist",
+            self.waited.as_secs_f64(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ThemesBusy {}
+
+/// Exit status for a busy theme lock (sysexits EX_TEMPFAIL).
+const EXIT_THEMES_BUSY: u8 = 75;
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // As anyhow's own `main` prints it.
+            eprintln!("Error: {error:?}");
+            if error.downcast_ref::<ThemesBusy>().is_some() {
+                std::process::ExitCode::from(EXIT_THEMES_BUSY)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     output::init(command_title(&cli.cmd));
     let ctx = Ctx::new().context("initialise context")?;
@@ -126,6 +186,11 @@ fn main() -> Result<()> {
             integrations,
             skip_wallpaper,
         } => cmd_set(&ctx, &theme, integrations.apply_flags(skip_wallpaper)),
+        Cmd::Mode {
+            mode,
+            integrations,
+            skip_wallpaper,
+        } => cmd_mode(&ctx, mode, integrations.apply_flags(skip_wallpaper)),
         Cmd::Reapply {
             integrations,
             wallpaper,
@@ -168,6 +233,7 @@ const fn command_title(command: &Cmd) -> &'static str {
     match command {
         Cmd::Init => "Prepare the theme directories",
         Cmd::Set { .. } => "Switch theme",
+        Cmd::Mode { .. } => "Switch between light and dark",
         Cmd::Reapply { .. } => "Reapply the active theme",
         Cmd::List => "Installed themes",
         Cmd::Inspect { .. } => "Theme palettes",
@@ -226,24 +292,103 @@ fn cmd_init(ctx: &Ctx) -> Result<()> {
 }
 
 fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> {
+    let _lock = lock_themes(ctx)?;
+    set_theme(ctx, theme_name, flags)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test fail point: stop a switch after `current.theme` is written and
+    /// before the render is published, as a logout or crash would.
+    static INTERRUPT_BEFORE_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Switches to `theme_name`; the caller holds the theme lock.
+///
+/// The order is what makes an interrupted switch safe: the theme is rendered
+/// into the stage first (a theme that does not render never becomes the
+/// named theme), then `current.theme` names it, then the render is
+/// published. A switch stopped between the last two leaves the old render on
+/// screen with the new name, and the next `gnist reapply` (at sign-in and on
+/// every update) completes it instead of silently reverting it.
+fn set_theme(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> {
     let theme = Theme::load(ctx, theme_name).context("load theme")?;
 
-    publish_theme(ctx, &theme)?;
+    let txn = stage_theme(ctx, &theme)?;
 
     // The selected theme is persistent state, not part of the rendered tree.
-    std::fs::write(&ctx.current_theme_file, format!("{}\n", theme.name))
-        .context("write current.theme")?;
+    // Written whole and renamed into place, so a reader never sees half.
+    write_atomic(
+        &ctx.current_theme_file,
+        format!("{}\n", theme.name).as_bytes(),
+    )
+    .context("write current.theme")?;
 
+    #[cfg(test)]
+    if INTERRUPT_BEFORE_PUBLISH.with(std::cell::Cell::get) {
+        bail!("interrupted before publishing (test fail point)");
+    }
+
+    txn.commit().context("commit transaction")?;
     apply_theme(ctx, &theme, flags)
 }
 
 fn cmd_reapply(ctx: &Ctx, flags: apply::ApplyFlags) -> Result<()> {
+    let _lock = lock_themes(ctx)?;
     let theme = Theme::load_current(ctx)?;
     publish_theme(ctx, &theme)?;
     apply_theme(ctx, &theme, flags)
 }
 
-fn publish_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
+/// Serializes the commands that publish a render or write `current.theme`.
+/// Two quick Day/Night presses then run one after the other, the second
+/// reading the name the first wrote, instead of interleaving their publishes.
+/// The lock is released when the returned file is closed (also on a crash).
+/// A living holder that hangs (apply waits on gsettings and the wallpaper
+/// daemon without a limit) must not block every later switch and the sign-in
+/// reapply, so the wait is limited.
+fn lock_themes(ctx: &Ctx) -> Result<std::fs::File> {
+    lock_themes_within(ctx, std::time::Duration::from_secs(20))
+}
+
+fn lock_themes_within(ctx: &Ctx, limit: std::time::Duration) -> Result<std::fs::File> {
+    let dir = ctx
+        .current_theme_file
+        .parent()
+        .context("current.theme has no directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join(".gnist.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+            Ok(()) => return Ok(file),
+            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                return Err(ThemesBusy {
+                    path,
+                    waited: limit,
+                }
+                .into());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("lock {}", path.display()));
+            }
+        }
+    }
+}
+
+/// Renders `theme` into a private stage; nothing is visible until commit.
+fn stage_theme(ctx: &Ctx, theme: &Theme) -> Result<Transaction> {
     let txn = Transaction::begin(ctx).context("begin transaction")?;
     let template_dirs: Vec<PathBuf> = ctx
         .source_roots
@@ -259,8 +404,13 @@ fn publish_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
     )
     .context("render templates")?;
     theme.stage(txn.stage()).context("stage assets")?;
-    txn.commit().context("commit transaction")?;
-    Ok(())
+    Ok(txn)
+}
+
+fn publish_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
+    stage_theme(ctx, theme)?
+        .commit()
+        .context("commit transaction")
 }
 
 fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()> {
@@ -370,6 +520,7 @@ fn cmd_remove(
         return Ok(());
     }
 
+    let _lock = lock_themes(ctx)?;
     if removing_current {
         if let Some(theme) = fallback {
             publish_theme(ctx, &theme).context("publish lower-precedence replacement theme")?;
@@ -511,6 +662,90 @@ fn list_installed(data_dir: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Writes `path` whole: a uniquely named temporary file in the same
+/// directory, flushed to disk, renamed over `path`, then the directory
+/// flushed, so neither a concurrent writer nor a power loss leaves it empty
+/// or half written.
+fn write_atomic(path: &std::path::Path, contents: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let dir = path
+        .parent()
+        .with_context(|| format!("{} has no directory", path.display()))?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".gnist.")
+        .suffix(".tmp")
+        .tempfile_in(dir)
+        .with_context(|| format!("create a temporary file in {}", dir.display()))?;
+    tmp.write_all(contents)
+        .and_then(|()| tmp.as_file().sync_all())
+        .with_context(|| format!("write {}", tmp.path().display()))?;
+    tmp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("rename into {}", path.display()))?;
+    std::fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .with_context(|| format!("sync {}", dir.display()))
+}
+
+/// The light or dark counterpart of `theme`: its `light_theme` /
+/// `dark_theme` key, else `<name>-light` / the name without `-light`.
+/// The counterpart must exist and be of the wanted mode.
+fn counterpart(ctx: &Ctx, theme: &Theme, want_light: bool) -> Result<String> {
+    let key = if want_light {
+        "light_theme"
+    } else {
+        "dark_theme"
+    };
+    let name = match theme.vars.get(key) {
+        Some(render::value::Value::Str(name)) if !name.trim().is_empty() => name.trim().to_owned(),
+        _ if want_light => format!("{}-light", theme.name),
+        _ => match theme.name.strip_suffix("-light") {
+            Some(base) => base.to_owned(),
+            None => bail!(
+                "theme '{}' names no dark counterpart (set {key} in its colors.toml)",
+                theme.name
+            ),
+        },
+    };
+    let other = Theme::load(ctx, &name).with_context(|| {
+        format!(
+            "theme '{}' has no {} counterpart '{name}' (set {key} in its colors.toml)",
+            theme.name,
+            if want_light { "light" } else { "dark" }
+        )
+    })?;
+    if other.is_light != want_light {
+        bail!(
+            "'{name}', the counterpart of '{}', is not a {} theme",
+            theme.name,
+            if want_light { "light" } else { "dark" }
+        );
+    }
+    Ok(name)
+}
+
+fn cmd_mode(ctx: &Ctx, mode: ModeArg, flags: apply::ApplyFlags) -> Result<()> {
+    let _lock = lock_themes(ctx)?;
+    // Read under the lock: a second toggle sees the first one's result.
+    let current = read_current_name(ctx).context("no current theme: run `gnist set` first")?;
+    let theme =
+        Theme::load(ctx, &current).with_context(|| format!("load current theme '{current}'"))?;
+    let want_light = match mode {
+        ModeArg::Light => true,
+        ModeArg::Dark => false,
+        ModeArg::Toggle => !theme.is_light,
+    };
+    if want_light == theme.is_light {
+        println!(
+            "{current} is already {}",
+            if want_light { "light" } else { "dark" }
+        );
+        return Ok(());
+    }
+    let target = counterpart(ctx, &theme, want_light)?;
+    set_theme(ctx, &target, flags)
+}
+
 fn read_current_name(ctx: &Ctx) -> Option<String> {
     let raw = std::fs::read_to_string(&ctx.current_theme_file).ok()?;
     let trimmed = raw.trim();
@@ -519,7 +754,10 @@ fn read_current_name(ctx: &Ctx) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Cmd, cmd_reapply, cmd_remove, cmd_set, cmd_update, read_current_name};
+    use super::{
+        Cli, Cmd, ModeArg, cmd_mode, cmd_reapply, cmd_remove, cmd_set, cmd_update,
+        read_current_name,
+    };
     use crate::{apply::ApplyFlags, ctx::Ctx, theme::Theme};
     use clap::Parser;
     use std::{ffi::OsStr, fs};
@@ -551,6 +789,225 @@ mod tests {
             skip_wallpaper: true,
             ..ApplyFlags::default()
         }
+    }
+
+    fn mode_ctx(dir: &tempfile::TempDir) -> Ctx {
+        let ctx = test_ctx(dir);
+        let data_root = &ctx.source_roots[1];
+        fs::create_dir_all(data_root.join("templates")).unwrap();
+        fs::write(
+            data_root.join("templates/app.conf.tpl"),
+            "mode={{ mode }}\n",
+        )
+        .unwrap();
+        fs::create_dir_all(ctx.current_theme_file.parent().unwrap()).unwrap();
+        ctx
+    }
+
+    fn write_mode_theme(ctx: &Ctx, name: &str, light: bool, extra: &str) {
+        let theme = ctx.source_roots[1].join("data").join(name);
+        fs::create_dir_all(&theme).unwrap();
+        fs::write(
+            theme.join("colors.toml"),
+            format!("accent = \"#123456\"\n{extra}"),
+        )
+        .unwrap();
+        if light {
+            fs::write(theme.join("light.mode"), "").unwrap();
+        }
+    }
+
+    #[test]
+    fn mode_parses_light_dark_and_toggle() {
+        for (word, mode) in [
+            ("light", ModeArg::Light),
+            ("dark", ModeArg::Dark),
+            ("toggle", ModeArg::Toggle),
+        ] {
+            let cli = Cli::try_parse_from(["gnist", "mode", word]).unwrap();
+            let Cmd::Mode { mode: parsed, .. } = cli.cmd else {
+                panic!("not mode")
+            };
+            assert_eq!(parsed, mode);
+        }
+        assert!(Cli::try_parse_from(["gnist", "mode", "sepia"]).is_err());
+    }
+
+    #[test]
+    fn mode_switches_by_name_rule_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "herda", false, "");
+        write_mode_theme(&ctx, "herda-light", true, "");
+        cmd_set(&ctx, "herda", skip_apply()).unwrap();
+
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=light\n"
+        );
+
+        // Already light: nothing changes.
+        cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+
+        cmd_mode(&ctx, ModeArg::Dark, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=dark\n"
+        );
+        assert_eq!(leftover_temporaries(&ctx), Vec::<String>::new());
+    }
+
+    fn leftover_temporaries(ctx: &Ctx) -> Vec<String> {
+        fs::read_dir(ctx.current_theme_file.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn an_interrupted_switch_completes_at_the_next_reapply() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "herda", false, "");
+        write_mode_theme(&ctx, "herda-light", true, "");
+        cmd_set(&ctx, "herda", skip_apply()).unwrap();
+
+        // Stopped after the name is written, before the render is published.
+        super::INTERRUPT_BEFORE_PUBLISH.with(|stop| stop.set(true));
+        let error = cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap_err();
+        super::INTERRUPT_BEFORE_PUBLISH.with(|stop| stop.set(false));
+        assert!(format!("{error:#}").contains("interrupted"), "{error:#}");
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=dark\n"
+        );
+
+        // The next reapply finishes the person's choice instead of reverting it.
+        cmd_reapply(&ctx, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda-light"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=light\n"
+        );
+    }
+
+    #[test]
+    fn a_theme_that_does_not_render_is_never_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "herda", false, "");
+        cmd_set(&ctx, "herda", skip_apply()).unwrap();
+        // A template that is not UTF-8 cannot be read, so the render fails.
+        fs::write(
+            ctx.source_roots[1].join("templates/broken.conf.tpl"),
+            b"\xff\xfe\n",
+        )
+        .unwrap();
+        write_mode_theme(&ctx, "herda-light", true, "");
+        let error = cmd_set(&ctx, "herda-light", skip_apply()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("render templates"),
+            "{error:#}"
+        );
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=dark\n"
+        );
+    }
+
+    #[test]
+    fn the_theme_lock_excludes_a_second_holder() {
+        use rustix::fs::{FlockOperation, flock};
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        let held = super::lock_themes(&ctx).unwrap();
+        let other = fs::OpenOptions::new()
+            .write(true)
+            .open(ctx.current_theme_file.parent().unwrap().join(".gnist.lock"))
+            .unwrap();
+        assert_eq!(
+            flock(&other, FlockOperation::NonBlockingLockExclusive),
+            Err(rustix::io::Errno::WOULDBLOCK)
+        );
+        drop(held);
+        flock(&other, FlockOperation::NonBlockingLockExclusive).unwrap();
+    }
+
+    #[test]
+    fn a_hung_holder_is_waited_for_only_so_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        let _held = super::lock_themes(&ctx).unwrap();
+        let started = std::time::Instant::now();
+        let error =
+            super::lock_themes_within(&ctx, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+        assert!(error.to_string().contains("still holds"), "{error:#}");
+        assert!(error.downcast_ref::<super::ThemesBusy>().is_some());
+    }
+
+    #[test]
+    fn quick_toggles_run_one_after_the_other() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "herda", false, "");
+        write_mode_theme(&ctx, "herda-light", true, "");
+        cmd_set(&ctx, "herda", skip_apply()).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap());
+            }
+        });
+        // Six toggles, each reading the previous one's result: back at Night,
+        // and the published render agrees with the name.
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("herda"));
+        assert_eq!(
+            fs::read_to_string(ctx.live_dir.join("app.conf")).unwrap(),
+            "mode=dark\n"
+        );
+        assert_eq!(leftover_temporaries(&ctx), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mode_follows_an_explicit_pair_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "night", false, "light_theme = \"day\"\n");
+        write_mode_theme(&ctx, "day", true, "dark_theme = \"night\"\n");
+        cmd_set(&ctx, "night", skip_apply()).unwrap();
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("day"));
+        cmd_mode(&ctx, ModeArg::Toggle, skip_apply()).unwrap();
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("night"));
+    }
+
+    #[test]
+    fn mode_refuses_a_missing_or_wrong_counterpart() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        write_mode_theme(&ctx, "lonely", false, "");
+        write_mode_theme(&ctx, "odd", false, "light_theme = \"lonely\"\n");
+        cmd_set(&ctx, "lonely", skip_apply()).unwrap();
+        let error = cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no light counterpart"),
+            "{error:#}"
+        );
+        cmd_set(&ctx, "odd", skip_apply()).unwrap();
+        let error = cmd_mode(&ctx, ModeArg::Light, skip_apply()).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("is not a light theme"),
+            "{error:#}"
+        );
+        assert_eq!(read_current_name(&ctx).as_deref(), Some("odd"));
     }
 
     #[test]
