@@ -133,7 +133,48 @@ enum Cmd {
     Wallpaper { image: Option<PathBuf> },
 }
 
-fn main() -> Result<()> {
+/// Another gnist holds the theme lock past the limit. `gnist` exits 75
+/// (EX_TEMPFAIL) for it, so a caller such as smia-session can keep the theme
+/// as it is and carry on instead of failing the session.
+#[derive(Debug)]
+struct ThemesBusy {
+    path: PathBuf,
+    waited: std::time::Duration,
+}
+
+impl std::fmt::Display for ThemesBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "another gnist has been switching the theme for {:.0} s and still holds {}; \
+             try again, or end that gnist",
+            self.waited.as_secs_f64(),
+            self.path.display()
+        )
+    }
+}
+
+impl std::error::Error for ThemesBusy {}
+
+/// Exit status for a busy theme lock (sysexits EX_TEMPFAIL).
+const EXIT_THEMES_BUSY: u8 = 75;
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // As anyhow's own `main` prints it.
+            eprintln!("Error: {error:?}");
+            if error.downcast_ref::<ThemesBusy>().is_some() {
+                std::process::ExitCode::from(EXIT_THEMES_BUSY)
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     output::init(command_title(&cli.cmd));
     let ctx = Ctx::new().context("initialise context")?;
@@ -303,7 +344,14 @@ fn cmd_reapply(ctx: &Ctx, flags: apply::ApplyFlags) -> Result<()> {
 /// Two quick Day/Night presses then run one after the other, the second
 /// reading the name the first wrote, instead of interleaving their publishes.
 /// The lock is released when the returned file is closed (also on a crash).
+/// A living holder that hangs (apply waits on gsettings and the wallpaper
+/// daemon without a limit) must not block every later switch and the sign-in
+/// reapply, so the wait is limited.
 fn lock_themes(ctx: &Ctx) -> Result<std::fs::File> {
+    lock_themes_within(ctx, std::time::Duration::from_secs(20))
+}
+
+fn lock_themes_within(ctx: &Ctx, limit: std::time::Duration) -> Result<std::fs::File> {
     let dir = ctx
         .current_theme_file
         .parent()
@@ -316,10 +364,22 @@ fn lock_themes(ctx: &Ctx) -> Result<std::fs::File> {
         .write(true)
         .open(&path)
         .with_context(|| format!("open {}", path.display()))?;
+    let deadline = std::time::Instant::now() + limit;
     loop {
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
+        match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
             Ok(()) => return Ok(file),
-            Err(rustix::io::Errno::INTR) => continue,
+            Err(rustix::io::Errno::WOULDBLOCK | rustix::io::Errno::INTR)
+                if std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(rustix::io::Errno::WOULDBLOCK) => {
+                return Err(ThemesBusy {
+                    path,
+                    waited: limit,
+                }
+                .into());
+            }
             Err(error) => {
                 return Err(error).with_context(|| format!("lock {}", path.display()));
             }
@@ -879,6 +939,19 @@ mod tests {
         );
         drop(held);
         flock(&other, FlockOperation::NonBlockingLockExclusive).unwrap();
+    }
+
+    #[test]
+    fn a_hung_holder_is_waited_for_only_so_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = mode_ctx(&dir);
+        let _held = super::lock_themes(&ctx).unwrap();
+        let started = std::time::Instant::now();
+        let error =
+            super::lock_themes_within(&ctx, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(started.elapsed() >= std::time::Duration::from_millis(300));
+        assert!(error.to_string().contains("still holds"), "{error:#}");
+        assert!(error.downcast_ref::<super::ThemesBusy>().is_some());
     }
 
     #[test]
