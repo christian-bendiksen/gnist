@@ -1,6 +1,6 @@
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -25,6 +25,7 @@ struct Guarded {
     dir: tempfile::TempDir,
     bin: PathBuf,
     log: PathBuf,
+    _awww_socket: UnixListener,
 }
 
 impl Guarded {
@@ -34,6 +35,8 @@ impl Guarded {
             fs::create_dir(dir.path().join(directory)).unwrap();
         }
         fs::set_permissions(dir.path().join("run"), fs::Permissions::from_mode(0o700)).unwrap();
+        let awww_socket =
+            UnixListener::bind(dir.path().join("run/wayland-0-awww-daemon.sock")).unwrap();
 
         let bin = dir.path().join("stand-ins");
         fs::create_dir(&bin).unwrap();
@@ -71,7 +74,12 @@ esac
             &bin.join("cat"),
             "#!/bin/sh\nwhile IFS= read -r line || [ -n \"$line\" ]; do printf '%s' \"$line\"; done < \"$1\"\n",
         );
-        Self { dir, bin, log }
+        Self {
+            dir,
+            bin,
+            log,
+            _awww_socket: awww_socket,
+        }
     }
 
     fn path(&self, name: &str) -> PathBuf {
@@ -679,6 +687,36 @@ fn skipped_gnome_never_writes_accessibility_settings() {
         String::from_utf8_lossy(&set.stderr)
     );
     assert!(!g.calls().unwrap_or_default().contains("gsettings "));
+}
+
+#[test]
+fn missing_wallpaper_socket_skips_awww_without_stalling() {
+    let g = Guarded::new();
+    fs::remove_file(g.path("run/wayland-0-awww-daemon.sock")).unwrap();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::create_dir_all(themes.join("data/dusk/backgrounds")).unwrap();
+    fs::write(themes.join("templates/gtk.css.tpl"), "window {}\n").unwrap();
+    fs::write(themes.join("data/dusk/backgrounds/0-night.png"), "image").unwrap();
+
+    let set = g.run(&[
+        "set",
+        "dusk",
+        "--skip-gnome",
+        "--skip-reload",
+        "--skip-icons",
+    ]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert!(
+        !g.calls().unwrap_or_default().contains("awww "),
+        "awww should not be spawned when no daemon socket exists"
+    );
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

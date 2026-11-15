@@ -12,7 +12,9 @@ use crate::{ctx::Ctx, theme::Theme, util};
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     collections::HashMap,
+    ffi::OsStr,
     fs,
+    os::unix::fs::FileTypeExt,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -255,15 +257,35 @@ fn change_wallpaper(path: &Path, cfg: &WallpaperConfig) -> Result<()> {
 }
 
 fn wait_for_awww() -> Result<()> {
+    wait_for_awww_in(
+        std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").as_deref(),
+        query_awww,
+    )
+}
+
+fn query_awww() -> Result<bool> {
+    let status = Command::new("awww")
+        .arg("query")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("query awww daemon")?;
+    Ok(status.success())
+}
+
+fn wait_for_awww_in(
+    xdg_runtime_dir: Option<&OsStr>,
+    wayland_display: Option<&OsStr>,
+    mut query: impl FnMut() -> Result<bool>,
+) -> Result<()> {
+    if !has_wallpaper_daemon_socket(xdg_runtime_dir, wayland_display) {
+        bail!("awww daemon socket is not present");
+    }
+
     for attempt in 0..4 {
-        let status = Command::new("awww")
-            .arg("query")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .context("query awww daemon")?;
-        if status.success() {
+        if query()? {
             return Ok(());
         }
 
@@ -273,6 +295,113 @@ fn wait_for_awww() -> Result<()> {
     }
 
     bail!("awww daemon did not become ready")
+}
+
+/// Fast socket-presence check before spawning `awww query`.
+///
+/// Each `awww query` call waits ~500 ms internally when no daemon is listening,
+/// so four attempts plus three 100 ms sleeps stall theme switches for ~2.4 s
+/// whenever no `awww` or `swww` daemon is running in the session.
+fn has_wallpaper_daemon_socket(
+    xdg_runtime_dir: Option<&OsStr>,
+    wayland_display: Option<&OsStr>,
+) -> bool {
+    let Some(runtime_dir) = xdg_runtime_dir
+        .filter(|value| !value.is_empty())
+        .map(Path::new)
+    else {
+        return false;
+    };
+    if !runtime_dir.is_dir() {
+        return false;
+    }
+
+    let explicit_display = wayland_display
+        .filter(|value| !value.is_empty())
+        .and_then(|value| Path::new(value).file_name())
+        .and_then(OsStr::to_str)
+        .filter(|value| !value.is_empty());
+    let display = explicit_display.unwrap_or("wayland-0");
+
+    let direct_candidates = [
+        runtime_dir.join(format!("{display}-awww-daemon.sock")),
+        runtime_dir.join(format!("{display}-swww-daemon.sock")),
+        runtime_dir.join(format!("awww-{display}.sock")),
+        runtime_dir.join(format!("swww-{display}.sock")),
+        runtime_dir.join("awww.sock"),
+        runtime_dir.join("swww.sock"),
+        runtime_dir
+            .join("awww-ipc")
+            .join(format!("{display}-awww-daemon.sock")),
+        runtime_dir.join("awww-ipc").join(format!("{display}.sock")),
+        runtime_dir.join("swww").join(format!("{display}.sock")),
+    ];
+    if direct_candidates.iter().any(|path| is_unix_socket(path)) {
+        return true;
+    }
+
+    has_matching_socket_in_dir(runtime_dir, |name| {
+        is_daemon_socket_name(name, display, explicit_display.is_none())
+    }) || has_matching_socket_in_dir(&runtime_dir.join("awww-ipc"), |name| {
+        is_subdir_daemon_socket_name(name, display, explicit_display.is_none())
+    }) || has_matching_socket_in_dir(&runtime_dir.join("swww"), |name| {
+        is_subdir_daemon_socket_name(name, display, explicit_display.is_none())
+    })
+}
+
+fn is_unix_socket(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+fn has_matching_socket_in_dir(dir: &Path, matches_name: impl Fn(&str) -> bool) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        matches_name(name) && is_unix_socket(&entry.path())
+    })
+}
+
+fn is_daemon_socket_name(name: &str, display: &str, allow_any_display: bool) -> bool {
+    let awww_prefix = format!("{display}-awww-daemon");
+    let swww_prefix = format!("{display}-swww-daemon");
+    let alt_awww_prefix = format!("awww-{display}");
+    let alt_swww_prefix = format!("swww-{display}");
+
+    if matches!(
+        name,
+        "awww.sock" | "swww.sock" | "awww-daemon.sock" | "swww-daemon.sock"
+    ) {
+        return true;
+    }
+
+    if !name.ends_with(".sock") {
+        return false;
+    }
+
+    if name.starts_with(&awww_prefix)
+        || name.starts_with(&swww_prefix)
+        || name.starts_with(&alt_awww_prefix)
+        || name.starts_with(&alt_swww_prefix)
+    {
+        return true;
+    }
+
+    allow_any_display
+        && (name.starts_with("awww")
+            || name.starts_with("swww")
+            || name.contains("-awww-daemon")
+            || name.contains("-swww-daemon"))
+}
+
+fn is_subdir_daemon_socket_name(name: &str, display: &str, allow_any_display: bool) -> bool {
+    name.ends_with(".sock")
+        && (name.starts_with(display)
+            || (allow_any_display && (name.starts_with("awww") || name.starts_with("swww"))))
 }
 
 fn notify(msg: &str) {
@@ -287,9 +416,15 @@ fn notify(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, pick_for_theme, pick_next, picture_key, resolve_image};
+    use super::{
+        Candidate, has_wallpaper_daemon_socket, pick_for_theme, pick_next, picture_key,
+        resolve_image, wait_for_awww_in,
+    };
+    use std::ffi::OsStr;
     use std::fs;
+    use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use std::time::{Duration, Instant};
 
     fn candidates(names: &[&str]) -> Vec<Candidate> {
         names
@@ -384,5 +519,113 @@ mod tests {
 
         assert!(resolve_image(&dir.path().join("missing.png")).is_err());
         assert!(resolve_image(dir.path()).is_err());
+    }
+
+    #[test]
+    fn wait_for_awww_fast_fails_when_runtime_dir_is_unset_or_empty() {
+        let mut query_calls = 0usize;
+        let started = Instant::now();
+        let err = wait_for_awww_in(None, Some(OsStr::new("wayland-0")), || {
+            query_calls += 1;
+            Ok(true)
+        })
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert_eq!(query_calls, 0);
+        assert!(err.to_string().contains("socket is not present"));
+
+        let empty_dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let err = wait_for_awww_in(
+            Some(empty_dir.path().as_os_str()),
+            Some(OsStr::new("wayland-0")),
+            || {
+                query_calls += 1;
+                Ok(true)
+            },
+        )
+        .unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(50));
+        assert_eq!(query_calls, 0);
+        assert!(err.to_string().contains("socket is not present"));
+
+        let missing = empty_dir.path().join("does-not-exist");
+        assert!(!has_wallpaper_daemon_socket(
+            Some(missing.as_os_str()),
+            Some(OsStr::new("wayland-0"))
+        ));
+        assert!(!has_wallpaper_daemon_socket(Some(OsStr::new("")), None));
+    }
+
+    #[test]
+    fn wallpaper_socket_check_detects_bound_awww_and_swww_sockets() {
+        for (socket_name, display) in [
+            ("wayland-0-awww-daemon.sock", Some("wayland-0")),
+            ("wayland-0-awww-daemon.sock", None),
+            ("wayland-2-awww-daemon.sock", Some("wayland-2")),
+            ("wayland-2-awww-daemon.sock", Some("/tmp/rt/wayland-2")),
+            ("wayland-0-awww-daemon-bg.sock", Some("wayland-0")),
+            ("wayland-0-swww-daemon.sock", Some("wayland-0")),
+            ("awww-wayland-0.sock", Some("wayland-0")),
+            ("swww-wayland-0.sock", Some("wayland-0")),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let _listener = UnixListener::bind(dir.path().join(socket_name)).unwrap();
+            assert!(
+                has_wallpaper_daemon_socket(Some(dir.path().as_os_str()), display.map(OsStr::new)),
+                "expected {socket_name} with display {display:?} to be detected"
+            );
+
+            let mut query_calls = 0usize;
+            wait_for_awww_in(
+                Some(dir.path().as_os_str()),
+                display.map(OsStr::new),
+                || {
+                    query_calls += 1;
+                    Ok(true)
+                },
+            )
+            .unwrap();
+            assert_eq!(query_calls, 1);
+        }
+    }
+
+    #[test]
+    fn wallpaper_socket_check_ignores_regular_files_and_unrelated_sockets() {
+        let dir = tempfile::tempdir().unwrap();
+        // Regular files and directories with daemon-like names are not Unix sockets.
+        fs::write(
+            dir.path().join("wayland-0-awww-daemon.sock"),
+            b"not a socket",
+        )
+        .unwrap();
+        fs::write(dir.path().join("awww-wayland-0.sock"), b"not a socket").unwrap();
+        fs::create_dir(dir.path().join("swww-wayland-0.sock")).unwrap();
+
+        // Real Unix sockets belonging to the compositor, audio, bus, or another display.
+        let _wayland = UnixListener::bind(dir.path().join("wayland-0")).unwrap();
+        let _pipewire = UnixListener::bind(dir.path().join("pipewire-0")).unwrap();
+        let _bus = UnixListener::bind(dir.path().join("bus")).unwrap();
+        let _other = UnixListener::bind(dir.path().join("unrelated.sock")).unwrap();
+        let _other_display =
+            UnixListener::bind(dir.path().join("wayland-1-awww-daemon.sock")).unwrap();
+
+        assert!(!has_wallpaper_daemon_socket(
+            Some(dir.path().as_os_str()),
+            Some(OsStr::new("wayland-0"))
+        ));
+
+        let mut query_calls = 0usize;
+        let err = wait_for_awww_in(
+            Some(dir.path().as_os_str()),
+            Some(OsStr::new("wayland-0")),
+            || {
+                query_calls += 1;
+                Ok(true)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(query_calls, 0);
+        assert!(err.to_string().contains("socket is not present"));
     }
 }
