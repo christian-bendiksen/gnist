@@ -13,6 +13,373 @@
 //! with the same role, so a terminal and a settings panel on the same screen
 //! are recognisably one system.
 
+/// An sRGB colour triple.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    #[must_use]
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+
+    /// Parse `#RRGGBB`.
+    #[must_use]
+    pub fn parse_hex(text: &str) -> Option<Self> {
+        let hex = text.trim().strip_prefix('#')?;
+        if hex.len() != 6 || !hex.is_ascii() {
+            return None;
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+        Some(Self { r, g, b })
+    }
+
+    /// Linear blend from `self` toward `other` by `t` in `0.0..=1.0`.
+    #[must_use]
+    pub fn blend(self, other: Self, t: f32) -> Self {
+        let t = t.clamp(0.0, 1.0);
+        let lerp = |a: u8, b: u8| -> u8 {
+            ((f32::from(a) * (1.0 - t)) + (f32::from(b) * t))
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        Self {
+            r: lerp(self.r, other.r),
+            g: lerp(self.g, other.g),
+            b: lerp(self.b, other.b),
+        }
+    }
+
+    /// Whether this colour is closer to white than black (for Day vs Night
+    /// wash contrast).
+    #[must_use]
+    pub fn is_light(self) -> bool {
+        // Rec.709 relative luma approximation in 0..=255.
+        let luma = (u32::from(self.r) * 2126 + u32::from(self.g) * 7152 + u32::from(self.b) * 722)
+            / 10_000;
+        luma >= 128
+    }
+
+    /// Nearest xterm-256 palette index (`16..=255`), avoiding ANSI slots `0..16`.
+    #[must_use]
+    pub fn nearest_256(self) -> u8 {
+        self.nearest_256_excluding(&[])
+    }
+
+    fn nearest_256_excluding(self, used: &[u8]) -> u8 {
+        let mut best_idx = 255u8;
+        let mut best_dist = u32::MAX;
+        for idx in 16u8..=255 {
+            if used.contains(&idx) {
+                continue;
+            }
+            let c = xterm_rgb(idx);
+            let dr = i32::from(self.r) - i32::from(c.r);
+            let dg = i32::from(self.g) - i32::from(c.g);
+            let db = i32::from(self.b) - i32::from(c.b);
+            let dist = (2 * dr * dr + 4 * dg * dg + 3 * db * db) as u32;
+            if dist < best_dist {
+                best_dist = dist;
+                best_idx = idx;
+            }
+        }
+        best_idx
+    }
+
+    fn fg_truecolor(self) -> String {
+        format!("38;2;{};{};{}", self.r, self.g, self.b)
+    }
+
+    fn bg_truecolor(self) -> String {
+        format!("48;2;{};{};{}", self.r, self.g, self.b)
+    }
+}
+
+const fn xterm_rgb(idx: u8) -> Rgb {
+    const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+    if idx < 232 {
+        let i = (idx - 16) as usize;
+        Rgb::new(CUBE[i / 36], CUBE[(i / 6) % 6], CUBE[i % 6])
+    } else {
+        let v = 8 + (idx - 232) * 10;
+        Rgb::new(v, v, v)
+    }
+}
+
+/// Complete colour palette for a terminal [`crate::terminal::Theme`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    pub text: Rgb,
+    pub muted: Rgb,
+    pub faint: Rgb,
+    pub rule: Rgb,
+    pub gold: Rgb,
+    pub green: Rgb,
+    pub danger: Rgb,
+    pub blue: Rgb,
+    pub magenta: Rgb,
+    pub cyan: Rgb,
+    pub selected_fg: Rgb,
+    pub selected_bg: Rgb,
+    pub wash_plate: Rgb,
+    pub wash_key: Rgb,
+    pub wash_accent: Rgb,
+    pub wash_cursor: Rgb,
+    pub wash_alarm: Rgb,
+}
+
+impl Palette {
+    /// Pinned V2 Fold Night palette used by [`crate::terminal::Theme::FULL`]
+    /// and [`crate::terminal::Theme::INDEXED`].
+    pub const V2_DARK: Self = Self {
+        text: Rgb::new(242, 242, 239),
+        muted: Rgb::new(180, 185, 187),
+        faint: Rgb::new(143, 148, 150),
+        rule: Rgb::new(58, 62, 65),
+        gold: Rgb::new(255, 188, 80),
+        green: Rgb::new(106, 213, 139),
+        danger: Rgb::new(255, 154, 118),
+        blue: Rgb::new(115, 181, 255),
+        magenta: Rgb::new(227, 149, 220),
+        cyan: Rgb::new(110, 217, 228),
+        selected_fg: Rgb::new(242, 242, 239),
+        selected_bg: Rgb::new(42, 46, 50),
+        wash_plate: Rgb::new(28, 31, 33),
+        wash_key: Rgb::new(37, 40, 41),
+        wash_accent: Rgb::new(57, 49, 33),
+        wash_cursor: Rgb::new(36, 34, 28),
+        wash_alarm: Rgb::new(36, 31, 31),
+    };
+
+    /// Built-in `herda-lysrom` Night palette (`gnist/themes/data/herda-lysrom/colors.toml`).
+    pub const LYSROM_NIGHT: Self = Self {
+        text: Rgb::new(0xF3, 0xF2, 0xEF),
+        muted: Rgb::new(0xAD, 0xAC, 0xAC),
+        faint: Rgb::new(0x7A, 0x7A, 0x7C),
+        rule: Rgb::new(0x3E, 0x3E, 0x43),
+        gold: Rgb::new(0xFF, 0x77, 0x4D),
+        green: Rgb::new(0x7C, 0xD5, 0x95),
+        danger: Rgb::new(0xF2, 0x36, 0x5A),
+        blue: Rgb::new(0x8D, 0xB8, 0xF0),
+        magenta: Rgb::new(0xC9, 0x9B, 0xE8),
+        cyan: Rgb::new(0x7F, 0xCF, 0xE0),
+        selected_fg: Rgb::new(0xF3, 0xF2, 0xEF),
+        selected_bg: Rgb::new(0x5D, 0x30, 0x2B),
+        wash_plate: Rgb::new(0x17, 0x17, 0x1D),
+        wash_key: Rgb::new(43, 43, 48),
+        wash_accent: Rgb::new(64, 40, 36),
+        wash_cursor: Rgb::new(43, 31, 33),
+        wash_alarm: Rgb::new(55, 24, 34),
+    };
+
+    /// Built-in `herda-lysrom-light` Day palette (`gnist/themes/data/herda-lysrom-light/colors.toml`).
+    pub const LYSROM_DAY: Self = Self {
+        text: Rgb::new(0x18, 0x17, 0x1B),
+        muted: Rgb::new(0x5D, 0x5D, 0x5F),
+        faint: Rgb::new(0x8C, 0x8B, 0x8D),
+        rule: Rgb::new(0xD2, 0xD1, 0xCF),
+        gold: Rgb::new(0xE3, 0x6A, 0x47),
+        green: Rgb::new(0x16, 0x62, 0x36),
+        danger: Rgb::new(0xCF, 0x1F, 0x45),
+        blue: Rgb::new(0x1F, 0x5F, 0xB8),
+        magenta: Rgb::new(0x7B, 0x3F, 0xA6),
+        cyan: Rgb::new(0x00, 0x69, 0x7A),
+        selected_fg: Rgb::new(0x18, 0x17, 0x1B),
+        selected_bg: Rgb::new(0xFF, 0xD3, 0xCA),
+        wash_plate: Rgb::new(0xFF, 0xFF, 0xFF),
+        wash_key: Rgb::new(236, 236, 236),
+        wash_accent: Rgb::new(250, 226, 219),
+        wash_cursor: Rgb::new(252, 240, 237),
+        wash_alarm: Rgb::new(249, 228, 233),
+    };
+
+    /// Built-in `herda-lysrom` Night palette adjusted for a room role `1..=8`.
+    #[must_use]
+    pub fn lysrom_night_with_room(room: Option<u8>) -> Self {
+        let mut palette = Self::LYSROM_NIGHT;
+        if let Some(role) = room.and_then(|r| match r {
+            1 => Some(Rgb::new(0x4A, 0xA8, 0xFF)),
+            2 => Some(Rgb::new(0x3F, 0xD6, 0x9A)),
+            3 => Some(Rgb::new(0x8F, 0x7B, 0xFF)),
+            4 => Some(Rgb::new(0xFF, 0x77, 0x4D)),
+            5 => Some(Rgb::new(0xFF, 0xC2, 0x4D)),
+            6 => Some(Rgb::new(0xC9, 0xE0, 0x4A)),
+            7 => Some(Rgb::new(0x3F, 0xD0, 0xE0)),
+            8 => Some(Rgb::new(0xFF, 0x7A, 0xCC)),
+            _ => None,
+        }) && role != palette.gold
+        {
+            palette.gold = role;
+            palette.selected_bg = palette.wash_plate.blend(role, 0.26);
+            palette.wash_accent = palette.wash_plate.blend(role, 0.18);
+            palette.wash_cursor = palette.wash_plate.blend(role, 0.09);
+        }
+        palette
+    }
+
+    fn ink_rgb(self, ink: Ink) -> Rgb {
+        match ink {
+            Ink::Text => self.text,
+            Ink::Muted => self.muted,
+            Ink::Faint => self.faint,
+            Ink::Rule => self.rule,
+            Ink::Gold => self.gold,
+            Ink::Green => self.green,
+            Ink::Danger => self.danger,
+            Ink::Blue => self.blue,
+            Ink::Magenta => self.magenta,
+            Ink::Cyan => self.cyan,
+            Ink::Selected => self.selected_fg,
+        }
+    }
+
+    fn wash_rgb(self, wash: Wash) -> Option<Rgb> {
+        match wash {
+            Wash::None => None,
+            Wash::Plate => Some(self.wash_plate),
+            Wash::Key => Some(self.wash_key),
+            Wash::Accent => Some(self.wash_accent),
+            Wash::Cursor => Some(self.wash_cursor),
+            Wash::Alarm => Some(self.wash_alarm),
+        }
+    }
+
+    /// Collision-free 256-colour indices for the 11 [`Ink`] variants (plus `selected_bg`).
+    fn indexed_inks(self) -> ([u8; 11], u8) {
+        let mut used = Vec::with_capacity(11);
+        let order = [
+            self.text,
+            self.muted,
+            self.faint,
+            self.rule,
+            self.gold,
+            self.green,
+            self.danger,
+            self.blue,
+            self.magenta,
+            self.cyan,
+        ];
+        let mut out = [0u8; 11];
+        for (slot, rgb) in order.iter().enumerate() {
+            let idx = rgb.nearest_256_excluding(&used);
+            used.push(idx);
+            out[slot] = idx;
+        }
+        out[10] = self.selected_fg.nearest_256();
+        let selected_bg = self.selected_bg.nearest_256_excluding(&[out[10]]);
+        (out, selected_bg)
+    }
+
+    /// Collision-free 256-colour indices for `[Plate, Key, Accent, Cursor, Alarm]`.
+    fn indexed_washes(self) -> [u8; 5] {
+        let mut used = Vec::with_capacity(5);
+        let order = [
+            self.wash_plate,
+            self.wash_key,
+            self.wash_accent,
+            self.wash_cursor,
+            self.wash_alarm,
+        ];
+        let mut out = [0u8; 5];
+        for (slot, rgb) in order.iter().enumerate() {
+            let idx = rgb.nearest_256_excluding(&used);
+            used.push(idx);
+            out[slot] = idx;
+        }
+        out
+    }
+
+    /// SGR body for an [`Ink`] at the terminal's colour depth.
+    #[must_use]
+    pub fn ink_sgr(self, ink: Ink, truecolor: bool) -> String {
+        if self == Self::V2_DARK {
+            return ink.code(truecolor).to_owned();
+        }
+        if truecolor {
+            let fg = self.ink_rgb(ink).fg_truecolor();
+            if ink == Ink::Selected {
+                format!("{fg};{}", self.selected_bg.bg_truecolor())
+            } else {
+                fg
+            }
+        } else {
+            let (inks, selected_bg) = self.indexed_inks();
+            let slot = match ink {
+                Ink::Text => 0,
+                Ink::Muted => 1,
+                Ink::Faint => 2,
+                Ink::Rule => 3,
+                Ink::Gold => 4,
+                Ink::Green => 5,
+                Ink::Danger => 6,
+                Ink::Blue => 7,
+                Ink::Magenta => 8,
+                Ink::Cyan => 9,
+                Ink::Selected => 10,
+            };
+            if ink == Ink::Selected {
+                format!("38;5;{};48;5;{selected_bg}", inks[slot])
+            } else {
+                format!("38;5;{}", inks[slot])
+            }
+        }
+    }
+
+    /// SGR body for a [`Wash`] at the terminal's colour depth, empty for [`Wash::None`].
+    #[must_use]
+    pub fn wash_sgr(self, wash: Wash, truecolor: bool) -> String {
+        if self == Self::V2_DARK {
+            return wash.code(truecolor).to_owned();
+        }
+        if wash == Wash::None {
+            return String::new();
+        }
+        if truecolor {
+            self.wash_rgb(wash)
+                .map_or_else(String::new, Rgb::bg_truecolor)
+        } else {
+            let washes = self.indexed_washes();
+            let slot = match wash {
+                Wash::None => return String::new(),
+                Wash::Plate => 0,
+                Wash::Key => 1,
+                Wash::Accent => 2,
+                Wash::Cursor => 3,
+                Wash::Alarm => 4,
+            };
+            format!("48;5;{}", washes[slot])
+        }
+    }
+
+    /// Eight colour stops for the heading seam, from `rule` toward `gold`.
+    #[must_use]
+    pub fn seam_stops(self) -> [Rgb; 8] {
+        if self == Self::V2_DARK {
+            return [
+                Rgb::new(58, 62, 65),
+                Rgb::new(83, 80, 76),
+                Rgb::new(107, 99, 86),
+                Rgb::new(132, 118, 97),
+                Rgb::new(156, 136, 108),
+                Rgb::new(181, 154, 118),
+                Rgb::new(206, 173, 129),
+                Rgb::new(230, 191, 139),
+            ];
+        }
+        let mut stops = [self.rule; 8];
+        for (i, stop) in stops.iter_mut().enumerate() {
+            *stop = self.rule.blend(self.gold, i as f32 / 8.0);
+        }
+        stops
+    }
+}
+
 /// A colour role. Never a colour — the same `Ink` is a different number of
 /// bits on a truecolor terminal, a 256-colour terminal and no terminal at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -245,43 +612,36 @@ pub mod glyph {
     pub const LEVELS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 }
 
-/// The seam's colour stops: the rule grey lifted toward the brand amber and
-/// back, mirrored around the brightest point.
-///
-/// Eight stops rather than a smooth ramp, because a per-column gradient across
-/// ninety-six columns costs ninety-six escape sequences for a single rule. This
-/// costs fifteen runs and is indistinguishable at a terminal's resolution.
-const SEAM: [&str; 8] = [
-    "38;2;58;62;65",
-    "38;2;83;80;76",
-    "38;2;107;99;86",
-    "38;2;132;118;97",
-    "38;2;156;136;108",
-    "38;2;181;154;118",
-    "38;2;206;173;129",
-    "38;2;230;191;139",
-];
-
 /// The gradient rule that sits under every heading.
 ///
 /// Truecolor only. On a 256-colour terminal the stops would band visibly and
 /// cost more than they are worth, so both it and `NO_COLOR` fall back to the
 /// flat rule — which is why this is a function that is given the theme rather
 /// than a string a caller can assemble.
+#[cfg(test)]
 pub(crate) fn seam(width: usize, color: bool, truecolor: bool) -> String {
+    seam_with(width, color, truecolor, Palette::V2_DARK)
+}
+
+pub(crate) fn seam_with(width: usize, color: bool, truecolor: bool, palette: Palette) -> String {
     let flat: String = std::iter::repeat_n(glyph::RULE, width).collect();
     if !color {
         return flat;
     }
     if !truecolor {
-        return format!("\x1b[22;{}m{flat}\x1b[0m", Ink::Rule.indexed());
+        return format!(
+            "\x1b[22;{}m{flat}\x1b[0m",
+            palette.ink_sgr(Ink::Rule, false)
+        );
     }
     // Up through the stops and back down, so the brightest point sits a third
     // of the way in the way the design draws it rather than in the middle.
-    let stops: Vec<&str> = SEAM
+    let raw_stops = palette.seam_stops();
+    let codes: Vec<String> = raw_stops.iter().map(|c| c.fg_truecolor()).collect();
+    let stops: Vec<&str> = codes
         .iter()
-        .copied()
-        .chain(SEAM.iter().rev().skip(1).copied())
+        .map(String::as_str)
+        .chain(codes.iter().rev().skip(1).map(String::as_str))
         .collect();
     let mut out = String::new();
     let mut placed = 0;

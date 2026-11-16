@@ -9,7 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub use crate::document::Document;
-pub use crate::ink::{Ink, glyph};
+pub use crate::ink::{Ink, Palette, glyph};
 pub use crate::width::Layout;
 
 /// What this terminal can render, decided once and then carried.
@@ -20,6 +20,7 @@ pub use crate::width::Layout;
 pub struct Theme {
     pub color: bool,
     pub truecolor: bool,
+    pub palette: Palette,
 }
 
 impl Theme {
@@ -27,6 +28,7 @@ impl Theme {
     pub const PLAIN: Self = Self {
         color: false,
         truecolor: false,
+        palette: Palette::V2_DARK,
     };
 
     /// Always styled, at full depth. For fixtures and for tests that pin what
@@ -34,6 +36,7 @@ impl Theme {
     pub const FULL: Self = Self {
         color: true,
         truecolor: true,
+        palette: Palette::V2_DARK,
     };
 
     /// Always styled, at 256 colours. The fallback path, which has its own
@@ -41,7 +44,27 @@ impl Theme {
     pub const INDEXED: Self = Self {
         color: true,
         truecolor: false,
+        palette: Palette::V2_DARK,
     };
+
+    /// Return a copy of this theme with an explicit [`Palette`].
+    #[must_use]
+    pub const fn with_palette(mut self, palette: Palette) -> Self {
+        self.palette = palette;
+        self
+    }
+
+    /// Build a theme from the contents of a Gnist `colors.toml` file and an
+    /// optional Lysrom room (`1..=8`).
+    #[must_use]
+    pub fn from_colors_toml(text: &str, room: Option<u8>, truecolor: bool) -> Option<Self> {
+        let palette = crate::gnist::parse_colors_toml(text, room)?;
+        Some(Self {
+            color: true,
+            truecolor,
+            palette,
+        })
+    }
 
     /// Decide from the environment and the terminal.
     #[must_use]
@@ -76,9 +99,29 @@ impl Theme {
             Ok(_) => true,
             Err(_) => std::io::stdout().is_terminal() && !dumb(),
         };
+        if !color {
+            return Self::PLAIN;
+        }
         Self {
-            color,
-            truecolor: color && deep(),
+            color: true,
+            truecolor: deep(),
+            palette: crate::gnist::detect_palette(),
+        }
+    }
+
+    /// Detect palette and colour depth for a stream known to want colour
+    /// (unless `NO_COLOR` is set).
+    #[must_use]
+    pub fn detect_colored() -> Self {
+        if std::env::var_os("NO_COLOR").is_some()
+            || std::env::var("FORCE_COLOR").as_deref() == Ok("0")
+        {
+            return Self::PLAIN;
+        }
+        Self {
+            color: true,
+            truecolor: deep(),
+            palette: crate::gnist::detect_palette(),
         }
     }
 
@@ -89,7 +132,7 @@ impl Theme {
         if !self.color || text.is_empty() {
             return text;
         }
-        let code = ink.code(self.truecolor);
+        let code = self.palette.ink_sgr(ink, self.truecolor);
         format!("\x1b[{};{code}m{text}\x1b[0m", if bold { 1 } else { 22 })
     }
 
@@ -215,7 +258,7 @@ impl Theme {
     /// why it degrades to [`Theme::rule`] rather than banding.
     #[must_use]
     pub fn seam(self, width: usize) -> String {
-        crate::ink::seam(width, self.color, self.truecolor)
+        crate::ink::seam_with(width, self.color, self.truecolor, self.palette)
     }
 
     pub fn title(self, title: &str) -> String {
@@ -492,6 +535,9 @@ pub fn report(app: &str, body: &str, badge: &str, columns: usize, theme: Theme) 
 }
 
 #[cfg(test)]
+pub(crate) static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -561,16 +607,10 @@ mod tests {
         assert_eq!(clip("\u{301}", 0), "");
     }
 
-    /// Serialises the tests that read and write process-wide environment.
-    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn documents_fit_and_retain_long_paths_and_untrusted_text() {
         for width in [24, 40, 60, 80, 120] {
-            let theme = Theme {
-                color: true,
-                truecolor: true,
-            };
+            let theme = Theme::FULL;
             let path = "/home/界面/a-long-directory/another-very-long-directory/settings.kdl";
             let mut document = Document::new("malm", "Deployment", "REVIEW", width, theme);
             document.field("Target", path, Ink::Text);
@@ -591,16 +631,7 @@ mod tests {
     fn reports_retain_complete_error_and_review_text_on_narrow_terminals() {
         let message = "Cannot apply the reviewed plan because /home/example/a-very-long-path/settings.kdl changed. Review again before applying.";
         for width in [8, 24, 40, 80] {
-            let text = report(
-                "malm",
-                message,
-                "ERROR",
-                width,
-                Theme {
-                    color: false,
-                    truecolor: false,
-                },
-            );
+            let text = report("malm", message, "ERROR", width, Theme::PLAIN);
             assert!(text.lines().all(|line| line.width() <= width));
             let compact = text.split_whitespace().collect::<String>();
             assert!(compact.contains(&message.split_whitespace().collect::<String>()));
@@ -675,7 +706,10 @@ mod tests {
                 ("TERM", Some("dumb")),
                 ("COLORTERM", Some("truecolor")),
             ],
-            || assert_eq!(Theme::detect(), Theme::FULL),
+            || {
+                let detected = Theme::detect();
+                assert!(detected.color && detected.truecolor);
+            },
         );
         with(&[("NO_COLOR", None), ("FORCE_COLOR", Some("0"))], || {
             assert_eq!(Theme::detect(), Theme::PLAIN);

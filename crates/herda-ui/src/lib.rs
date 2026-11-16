@@ -43,6 +43,7 @@ pub mod browser;
 pub mod cells;
 pub mod document;
 pub mod frame;
+pub mod gnist;
 pub mod ink;
 pub mod pieces;
 pub mod presentation;

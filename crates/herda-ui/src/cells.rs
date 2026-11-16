@@ -630,11 +630,11 @@ fn sgr(style: Style, theme: Theme) -> String {
         out.push_str(";1");
     }
     out.push(';');
-    out.push_str(style.ink.code(theme.truecolor));
-    let wash = style.wash.code(theme.truecolor);
+    out.push_str(&theme.palette.ink_sgr(style.ink, theme.truecolor));
+    let wash = theme.palette.wash_sgr(style.wash, theme.truecolor);
     if !wash.is_empty() {
         out.push(';');
-        out.push_str(wash);
+        out.push_str(&wash);
     }
     out.push('m');
     out

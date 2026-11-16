@@ -1,7 +1,7 @@
 # Herda terminal components
 
 This is a source snapshot of `crates/herda-ui` from Herda commit
-`46c55ab77998ad5500e1e78aa9afcd9eac5ba41d`.
+`dfd48c750f60e517b750cf0c683f320166467cb8`.
 
 The implementation belongs to Herda. Keep its Cargo.toml and src/ byte-for-byte
 identical when updating this snapshot. Make renderer changes upstream, then
@@ -28,15 +28,16 @@ upstream and refresh instead.
 | --- | --- | --- |
 | Cargo.toml | 1523 | 36 |
 | src/browser.rs | 24778 | 685 |
-| src/cells.rs | 44854 | 1212 |
+| src/cells.rs | 44893 | 1212 |
 | src/document.rs | 21345 | 613 |
 | src/frame_fixtures.rs | 22190 | 657 |
 | src/frame.rs | 28615 | 815 |
 | src/frame_tests.rs | 23352 | 620 |
-| src/ink.rs | 16386 | 436 |
-| src/lib.rs | 3569 | 76 |
+| src/gnist.rs | 25364 | 766 |
+| src/ink.rs | 28316 | 796 |
+| src/lib.rs | 3584 | 77 |
 | src/pieces.rs | 76519 | 2207 |
-| src/presentation.rs | 9450 | 265 |
+| src/presentation.rs | 9854 | 277 |
 | src/progress.rs | 24338 | 694 |
 | src/revision_line.rs | 46239 | 1204 |
 | src/scale.rs | 14547 | 352 |
@@ -45,6 +46,6 @@ upstream and refresh instead.
 | src/session_tests.rs | 8594 | 291 |
 | src/surface.rs | 5381 | 151 |
 | src/surface_tests.rs | 1975 | 65 |
-| src/terminal.rs | 25204 | 690 |
+| src/terminal.rs | 26347 | 724 |
 | src/width.rs | 9496 | 269 |
 | src/work.rs | 23172 | 659 |

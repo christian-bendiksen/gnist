@@ -96,10 +96,18 @@ pub fn open(title: &str, badge: &str) -> Document {
 /// a late `if json { … }` branch — which is how prose came to be interleaved
 /// with JSON — cannot be expressed.
 pub fn emit(rendered: &str) {
+    let _ = try_emit(rendered);
+}
+
+/// Emit a rendered document, reporting write and flush errors to the caller.
+/// The best-effort [`emit`] entry point retains its existing error policy.
+pub fn try_emit(rendered: &str) -> std::io::Result<()> {
     if let Some(p) = PRESENTATION.get() {
         p.header.store(true, Ordering::Relaxed);
     }
-    let _ = std::io::stdout().lock().write_all(rendered.as_bytes());
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(rendered.as_bytes())?;
+    stdout.flush()
 }
 
 /// Human progress belongs on stderr when stdout carries a machine response.
@@ -126,7 +134,7 @@ pub fn section(name: &str) {
     let theme = theme();
     let width = layout().content();
     let mut stdout = std::io::stdout().lock();
-    header(&mut stdout, theme, width);
+    let _ = header(&mut stdout, theme, width);
     let _ = writeln!(stdout);
     for line in fold(name, width) {
         let _ = writeln!(stdout, "  {}", theme.paint(&line, Ink::Text, true));
@@ -147,6 +155,12 @@ pub fn phase(label: &str, tail: &str) -> String {
 /// All ordinary stdout goes through this boundary. Data and redirected output
 /// retain their bytes; only a human terminal receives the shared document style.
 pub fn line(args: std::fmt::Arguments<'_>) {
+    let _ = try_line(args);
+}
+
+/// Render a line with the same terminal cleaning and layout as [`line()`],
+/// reporting output failures so a command can decide its exit status.
+pub fn try_line(args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
     let text = args.to_string();
     // A real terminal must never receive control characters from external text,
     // even under `--plain` — plain is a styling choice, not a licence for a
@@ -156,24 +170,25 @@ pub fn line(args: std::fmt::Arguments<'_>) {
     let mut stdout = std::io::stdout().lock();
     if !interactive() {
         if terminal_output {
-            let _ = writeln!(stdout, "{}", crate::terminal::clean(&text));
+            writeln!(stdout, "{}", crate::terminal::clean(&text))?;
         } else {
-            let _ = writeln!(stdout, "{text}");
+            writeln!(stdout, "{text}")?;
         }
-        return;
+        return stdout.flush();
     }
     let theme = theme();
     let width = layout().content();
-    header(&mut stdout, theme, width);
+    header(&mut stdout, theme, width)?;
     let text = plain(&text);
     for raw in text.lines() {
         for line in fold(raw, width) {
-            let _ = writeln!(stdout, "  {}", theme.paint(&line, ink_for(raw), false));
+            writeln!(stdout, "  {}", theme.paint(&line, ink_for(raw), false))?;
         }
     }
     if text.is_empty() {
-        let _ = writeln!(stdout);
+        writeln!(stdout)?;
     }
+    stdout.flush()
 }
 
 /// What a streamed line is saying, from the glyph it leads with.
@@ -192,17 +207,19 @@ fn ink_for(raw: &str) -> Ink {
 }
 
 /// The command's heading, printed before the first thing it says.
-fn header(stdout: &mut impl Write, theme: Theme, width: usize) {
-    let Some(p) = PRESENTATION.get() else { return };
+fn header(stdout: &mut impl Write, theme: Theme, width: usize) -> std::io::Result<()> {
+    let Some(p) = PRESENTATION.get() else {
+        return Ok(());
+    };
     if p.header.swap(true, Ordering::Relaxed) {
-        return;
+        return Ok(());
     }
-    let _ = writeln!(
+    writeln!(
         stdout,
         "\n  {}\n\n  {}",
         theme.heading_for(p.app, p.title, "", width),
         theme.seam(width)
-    );
+    )
 }
 
 /// What the command could not do, on stderr, as its own document.
@@ -215,12 +232,7 @@ pub fn error(message: &str) {
         // stderr is a terminal even when stdout is a pipe, which is exactly the
         // case this branch exists for — so the theme is decided from the
         // environment rather than from stdout.
-        let theme = Theme::detect_for(false);
-        let theme = Theme {
-            color: std::env::var_os("NO_COLOR").is_none()
-                && std::env::var("FORCE_COLOR").as_deref() != Ok("0"),
-            ..theme
-        };
+        let theme = Theme::detect_colored();
         let mut doc = Document::new(
             app(),
             "Could not complete the command",
