@@ -9,18 +9,94 @@ use anyhow::{Context, Result, bail};
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 use vars::build_vars_from_colors;
+
+pub const LIGHT_MODE_FILE: &str = "light.mode";
+pub const ICONS_THEME_FILE: &str = "icons.theme";
+pub const BACKGROUNDS_DIR: &str = "backgrounds";
+pub const PREVIEW_FILE: &str = "preview.png";
+
+/// Theme files and directories that are metadata or repository clutter and are
+/// never published verbatim into `generated/live/`.
+pub const METADATA: &[&str] = &[
+    ".git",
+    "colors.toml",
+    LIGHT_MODE_FILE,
+    ICONS_THEME_FILE,
+    BACKGROUNDS_DIR,
+    "gnome.toml",
+    "wallpaper.toml",
+    "theme.toml",
+    PREVIEW_FILE,
+    "preview-unlock.png",
+    "unlock.png",
+    "keyboard.rgb",
+    "shell.toml",
+];
+
+/// Supported wallpaper file extensions (matched case-insensitively).
+pub const WALLPAPER_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "avif", "jxl", "gif"];
+
+/// Returns true if a path **relative to a theme root** is theme metadata or
+/// repository clutter that must not be published into `generated/live/`.
+pub fn is_metadata(rel: &Path) -> bool {
+    rel.components().any(|component| {
+        let Some(name) = component.as_os_str().to_str() else {
+            return false;
+        };
+        if METADATA.contains(&name) {
+            return true;
+        }
+        let upper = name.to_ascii_uppercase();
+        if upper.starts_with("README") || upper.starts_with("LICENSE") {
+            return true;
+        }
+        name.starts_with("shell.") && name.ends_with(".toml")
+    })
+}
+
+/// Returns true if `path` is a regular file with a supported wallpaper image extension.
+pub fn is_wallpaper_image(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                WALLPAPER_EXTENSIONS
+                    .iter()
+                    .any(|allowed| ext.eq_ignore_ascii_case(allowed))
+            })
+}
 
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub name: String,
+    pub display_name: Option<String>,
     pub root: PathBuf,
     pub vars: HashMap<String, Value>,
     pub is_light: bool,
+    pub generated: bool,
     pub icon_theme: Option<String>,
+    pub preview: Option<PathBuf>,
     pub backgrounds_dir: Option<PathBuf>,
+}
+
+/// Locate the highest-precedence directory for `name`, rejecting path traversal.
+pub fn find_root(ctx: &Ctx, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.starts_with('.') {
+        return None;
+    }
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) => {}
+        _ => return None,
+    }
+    ctx.source_roots
+        .iter()
+        .map(|source| source.join("data").join(name))
+        .find(|root| root.is_dir())
 }
 
 impl Theme {
@@ -50,15 +126,24 @@ impl Theme {
         }
 
         let colors_file = root.join("colors.toml");
-        if !colors_file.is_file() {
+        let (mut vars, generated) = if colors_file.is_file() {
+            let vars = build_vars_from_colors(&colors_file)
+                .with_context(|| format!("build vars for theme '{name}'"))?;
+            (vars, false)
+        } else if let Some(generated_toml) = colors::generate(&root) {
+            let vars = vars::build_vars_from_str(&generated_toml)
+                .with_context(|| format!("build vars for generated theme '{name}'"))?;
+            (vars, true)
+        } else {
             bail!(
                 "missing colors.toml in theme '{name}': {}",
                 colors_file.display()
             );
-        }
+        };
 
-        let mut vars = build_vars_from_colors(&colors_file)
-            .with_context(|| format!("build vars for theme '{name}'"))?;
+        // Read optional display name before inject_context overwrites `name` with the id.
+        let display_name = read_display_name(&root, &vars);
+
         palette::resolve(&mut vars);
         vars::derive_all_color_keys(&mut vars);
 
@@ -77,7 +162,7 @@ impl Theme {
             vars::insert_border(&mut vars, "inactive", c);
         }
 
-        let bg_dir = root.join("backgrounds");
+        let bg_dir = root.join(BACKGROUNDS_DIR);
         let is_light = resolve_is_light(&root, &vars);
         let wallpapers: Vec<String> = image_files(&bg_dir)
             .into_iter()
@@ -85,10 +170,15 @@ impl Theme {
             .collect();
         vars::inject_context(&mut vars, name, is_light, &wallpapers);
 
+        let preview = root.join(PREVIEW_FILE);
+
         Ok(Self {
             name: name.to_owned(),
+            display_name,
             is_light,
-            icon_theme: read_trimmed(&root.join("icons.theme"))?,
+            generated,
+            icon_theme: read_trimmed(&root.join(ICONS_THEME_FILE))?,
+            preview: preview.is_file().then_some(preview),
             backgrounds_dir: bg_dir.is_dir().then_some(bg_dir),
             root,
             vars,
@@ -115,18 +205,39 @@ impl Theme {
 
     pub fn stage(&self, stage: &Path) -> Result<()> {
         if self.is_light {
-            fs::write(stage.join("light.mode"), b"").context("write light.mode")?;
+            fs::write(stage.join(LIGHT_MODE_FILE), b"").context("write light.mode")?;
         }
-        let icons = self.root.join("icons.theme");
+        let icons = self.root.join(ICONS_THEME_FILE);
         if icons.is_file() {
-            crate::util::symlink_force(&icons, &stage.join("icons.theme"))
+            crate::util::symlink_force(&icons, &stage.join(ICONS_THEME_FILE))
                 .context("symlink icons.theme")?;
         }
         if let Some(bg) = &self.backgrounds_dir {
-            crate::util::symlink_force(bg, &stage.join("backgrounds"))
+            crate::util::symlink_force(bg, &stage.join(BACKGROUNDS_DIR))
                 .context("symlink backgrounds")?;
         }
         Ok(())
+    }
+}
+
+/// Optional human-readable display name from `theme.toml` or `colors.toml`.
+fn read_display_name(root: &Path, vars: &HashMap<String, Value>) -> Option<String> {
+    if let Ok(text) = fs::read_to_string(root.join("theme.toml"))
+        && let Ok(table) = toml::from_str::<toml::Table>(&text)
+        && let Some(name) = table
+            .get("name")
+            .and_then(toml::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return Some(name.to_owned());
+    }
+    match vars.get("name") {
+        Some(Value::Str(s)) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        _ => None,
     }
 }
 
@@ -176,7 +287,8 @@ fn list_names_from_roots(source_roots: &[PathBuf]) -> Result<Vec<String>> {
             entries
                 .flatten()
                 .filter(|entry| entry.path().is_dir())
-                .filter_map(|entry| entry.file_name().into_string().ok()),
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| !name.starts_with('.')),
         );
     }
 
@@ -189,7 +301,7 @@ fn image_files(dir: &Path) -> Vec<PathBuf> {
             entries
                 .flatten()
                 .map(|entry| entry.path())
-                .filter(|path| path.is_file())
+                .filter(|path| is_wallpaper_image(path))
                 .collect()
         })
         .unwrap_or_default();
@@ -352,5 +464,96 @@ mod tests {
         fs::create_dir_all(&lum_382).unwrap();
         fs::write(lum_382.join("colors.toml"), "background = \"#807f7f\"\n").unwrap();
         assert!(!Theme::load_root(lum_382, "lum-382").unwrap().is_light);
+    }
+
+    #[test]
+    fn wallpaper_filter_keeps_images_only_and_skips_text_and_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("theme");
+        let bg = root.join("backgrounds");
+        fs::create_dir_all(bg.join("intros")).unwrap();
+        fs::create_dir_all(bg.join("loops")).unwrap();
+        fs::write(root.join("colors.toml"), "accent = \"#123456\"\n").unwrap();
+        for name in [
+            "a.png",
+            "b.JPG",
+            "c.jpeg",
+            "d.webp",
+            "e.avif",
+            "f.jxl",
+            "g.GIF",
+            "notes.txt",
+            "README.md",
+            "video.mp4",
+        ] {
+            fs::write(bg.join(name), "data").unwrap();
+        }
+        fs::write(bg.join("intros/a.mp4"), "video").unwrap();
+
+        let theme = Theme::load_root(root, "theme").unwrap();
+        let names: Vec<String> = match &theme.vars["wallpapers"] {
+            crate::render::value::Value::List(items) => items
+                .iter()
+                .map(|v| {
+                    std::path::PathBuf::from(v.display())
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect(),
+            other => panic!("expected list, got {other:?}"),
+        };
+        assert_eq!(
+            names,
+            [
+                "a.png", "b.JPG", "c.jpeg", "d.webp", "e.avif", "f.jxl", "g.GIF"
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_theme_generates_colors_in_memory_without_writing_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("legacy");
+        fs::create_dir_all(&root).unwrap();
+        let mut kitty = String::from(
+            "foreground #cdd6f4\nbackground #1e1e2e\ncursor #f5e0dc\n\
+             selection_foreground #cdd6f4\nselection_background #45475a\n",
+        );
+        for i in 0..16 {
+            kitty.push_str(&format!("color{i} #{i:02x}{i:02x}{i:02x}\n"));
+        }
+        fs::write(root.join("kitty.conf"), kitty).unwrap();
+
+        let theme = Theme::load_root(root.clone(), "legacy").unwrap();
+        assert!(theme.generated);
+        assert_eq!(theme.vars["foreground"].display(), "#cdd6f4");
+        assert_eq!(theme.vars["accent"].display(), "#040404");
+        assert!(!root.join("colors.toml").exists());
+    }
+
+    #[test]
+    fn display_name_and_preview_are_loaded_from_theme_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("tokyo-night");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("colors.toml"),
+            "name = \"From Colors\"\naccent = \"#7aa2f7\"\n",
+        )
+        .unwrap();
+        fs::write(root.join("preview.png"), "png").unwrap();
+
+        let theme = Theme::load_root(root.clone(), "tokyo-night").unwrap();
+        assert_eq!(theme.display_name.as_deref(), Some("From Colors"));
+        assert_eq!(theme.preview, Some(root.join("preview.png")));
+        // Template `name` remains the theme id.
+        assert_eq!(theme.vars["name"].display(), "tokyo-night");
+
+        // theme.toml takes precedence over colors.toml for display_name.
+        fs::write(root.join("theme.toml"), "name = \"Tokyo Night\"\n").unwrap();
+        let theme = Theme::load_root(root, "tokyo-night").unwrap();
+        assert_eq!(theme.display_name.as_deref(), Some("Tokyo Night"));
     }
 }

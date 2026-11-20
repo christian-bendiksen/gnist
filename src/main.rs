@@ -395,12 +395,18 @@ fn stage_theme(ctx: &Ctx, theme: &Theme) -> Result<Transaction> {
         .iter()
         .map(|root| root.join("templates"))
         .collect();
+    let origin = if theme.root.join(".git").is_dir() {
+        render::engine::ThemeOrigin::Cloned
+    } else {
+        render::engine::ThemeOrigin::Local
+    };
     render::engine::render_all(
         &template_dirs,
         &ctx.user_templates_dir,
         &theme.root,
         txn.stage(),
         &theme.vars,
+        origin,
     )
     .context("render templates")?;
     theme.stage(txn.stage()).context("stage assets")?;
@@ -659,6 +665,7 @@ fn list_installed(data_dir: &Path) -> Result<Vec<String>> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|name| !name.starts_with('.'))
         .collect())
 }
 

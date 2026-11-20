@@ -9,11 +9,44 @@ use super::parser::{Token, parse, raw_span};
 use super::value::Value;
 use anyhow::{Context, Result};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
 use walkdir::WalkDir;
+
+/// Whether a theme directory is a local (trusted) tree or a git-cloned repo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeOrigin {
+    Local,
+    Cloned,
+}
+
+/// Exact filenames a git-cloned theme is never allowed to publish directly (nor
+/// render via its own `.tpl` templates), because host applications execute or
+/// launch programs from them. `*.lua` files are also denied. Global templates
+/// still generate these outputs when nothing claims them.
+pub const CLONED_DENYLIST: &[&str] = &[
+    "alacritty.toml",
+    "foot.ini",
+    "ghostty.conf",
+    "kitty.conf",
+    "vscode.json",
+];
+
+/// Returns true if `rel` (relative to the output root) is forbidden for cloned themes.
+pub fn is_cloned_denied(rel: &Path) -> bool {
+    if rel
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lua"))
+    {
+        return true;
+    }
+    rel.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| CLONED_DENYLIST.contains(&name))
+}
 
 /// Build the output tree with config user templates taking precedence over
 /// theme files, followed by template roots in their supplied order.
@@ -23,6 +56,7 @@ pub fn render_all(
     theme_files_dir: &Path,
     out_dir: &Path,
     values: &HashMap<String, Value>,
+    origin: ThemeOrigin,
 ) -> Result<()> {
     // A global templates directory is optional: themes may carry their own
     // `.tpl` templates, or ship only static files.
@@ -40,19 +74,29 @@ pub fn render_all(
     }
 
     if theme_files_dir.is_dir() {
+        let mut dropped: BTreeSet<String> = BTreeSet::new();
+
         // A theme can ship self-contained templates: `.tpl` files in its own
         // directory are rendered here, ahead of static files and global
         // templates, but after user templates.
-        for tpl in theme_templates_in(theme_files_dir) {
+        for tpl in theme_templates_in(theme_files_dir, origin, &mut dropped) {
             let rel = tpl.strip_prefix(theme_files_dir)?.to_path_buf();
             let out_rel = render_path(&rel, values);
+            if origin == ThemeOrigin::Cloned && is_cloned_denied(&out_rel) {
+                dropped.insert(rel.display().to_string());
+                continue;
+            }
             if !claimed.contains(&out_rel) {
                 render_one(&tpl, &out_rel, values, out_dir)?;
                 claimed.insert(out_rel);
             }
         }
-        for src in theme_files_in(theme_files_dir) {
+        for src in theme_files_in(theme_files_dir, origin, &mut dropped) {
             let rel = src.strip_prefix(theme_files_dir)?.to_path_buf();
+            if origin == ThemeOrigin::Cloned && is_cloned_denied(&rel) {
+                dropped.insert(rel.display().to_string());
+                continue;
+            }
             if !claimed.contains(&rel) {
                 let out_path = out_dir.join(&rel);
                 if let Some(parent) = out_path.parent() {
@@ -61,6 +105,14 @@ pub fn render_all(
                 fs::copy(&src, &out_path)?;
                 claimed.insert(rel);
             }
+        }
+
+        if !dropped.is_empty() {
+            let list: Vec<&str> = dropped.iter().map(String::as_str).collect();
+            eprintln!(
+                "warn: skipped untrusted files in cloned theme: {}",
+                list.join(", ")
+            );
         }
     }
 
@@ -296,43 +348,71 @@ fn templates_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
 }
 
 /// `.tpl` files inside a selected theme are rendered as its own templates.
-fn theme_templates_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
-    templates_in(dir)
+fn theme_templates_in(
+    dir: &Path,
+    origin: ThemeOrigin,
+    dropped: &mut BTreeSet<String>,
+) -> Vec<PathBuf> {
+    walk_theme_entries(dir, origin, dropped)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|x| x.to_str()) == Some("tpl"))
+        .collect()
 }
 
 /// Static theme files that are copied verbatim (templates excluded).
-fn theme_files_in(dir: &Path) -> impl Iterator<Item = PathBuf> {
-    WalkDir::new(dir)
-        .follow_links(true)
+fn theme_files_in(dir: &Path, origin: ThemeOrigin, dropped: &mut BTreeSet<String>) -> Vec<PathBuf> {
+    walk_theme_entries(dir, origin, dropped)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && !is_theme_metadata(e.path())
-                && e.path().extension().and_then(|x| x.to_str()) != Some("tpl")
-        })
-        .map(|e| e.into_path())
+        .filter(|path| path.extension().and_then(|x| x.to_str()) != Some("tpl"))
+        .collect()
 }
 
-fn is_theme_metadata(path: &Path) -> bool {
-    path.components().any(|c| {
-        matches!(
-            c.as_os_str().to_str(),
-            Some(
-                "colors.toml"
-                    | "light.mode"
-                    | "icons.theme"
-                    | "backgrounds"
-                    | "gnome.toml"
-                    | "wallpaper.toml"
-            )
-        )
-    })
+/// Walk non-metadata files under a theme directory, respecting `origin`.
+///
+/// Metadata is tested strictly against paths **relative** to `dir`, so a theme
+/// directory named e.g. `backgrounds` still publishes its own files. For
+/// `Cloned` themes symlinks are never followed and are recorded in `dropped`.
+fn walk_theme_entries(
+    dir: &Path,
+    origin: ThemeOrigin,
+    dropped: &mut BTreeSet<String>,
+) -> Vec<PathBuf> {
+    let follow = origin == ThemeOrigin::Local;
+    let mut out = Vec::new();
+    let iter = WalkDir::new(dir)
+        .follow_links(follow)
+        .into_iter()
+        .filter_entry(|e| {
+            if e.depth() == 0 {
+                return true;
+            }
+            e.path()
+                .strip_prefix(dir)
+                .ok()
+                .is_none_or(|rel| !crate::theme::is_metadata(rel))
+        });
+
+    for entry in iter.filter_map(|e| e.ok()) {
+        if entry.depth() == 0 {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(dir) else {
+            continue;
+        };
+        if origin == ThemeOrigin::Cloned && entry.file_type().is_symlink() {
+            dropped.insert(rel.display().to_string());
+            continue;
+        }
+        if entry.file_type().is_file() {
+            out.push(entry.into_path());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{find_else, render_all, render_str};
+    use super::{ThemeOrigin, find_else, render_all, render_str};
     use crate::render::parser::parse;
     use crate::render::value::Value;
     use std::{collections::HashMap, fs, path::Path};
@@ -398,7 +478,15 @@ mod tests {
             system_two_templates,
         ];
         let vars = str_map(&[("accent", "blue")]);
-        render_all(&template_dirs, &user_templates, &theme, &out, &vars).unwrap();
+        render_all(
+            &template_dirs,
+            &user_templates,
+            &theme,
+            &out,
+            &vars,
+            ThemeOrigin::Local,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(out.join("all")).unwrap(),
@@ -434,7 +522,15 @@ mod tests {
         write(&user_templates.join("own.tpl"), "user");
 
         let vars = str_map(&[("accent", "#89b4fa")]);
-        render_all(&[config_templates], &user_templates, &theme, &out, &vars).unwrap();
+        render_all(
+            &[config_templates],
+            &user_templates,
+            &theme,
+            &out,
+            &vars,
+            ThemeOrigin::Local,
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(out.join("self")).unwrap(),
@@ -465,6 +561,7 @@ mod tests {
             &dir.path().join("theme"),
             &out,
             &HashMap::new(),
+            ThemeOrigin::Local,
         )
         .unwrap();
 
@@ -577,6 +674,7 @@ mod tests {
             &dir.path().join("theme"),
             &out,
             &vars,
+            ThemeOrigin::Local,
         )
         .unwrap();
 
@@ -614,5 +712,139 @@ mod tests {
             ),
             "outer"
         );
+    }
+
+    #[test]
+    fn theme_directory_named_backgrounds_still_publishes_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let theme = dir.path().join("backgrounds");
+        let out = dir.path().join("out");
+        write(&theme.join("kitty.conf"), "foreground #ffffff\n");
+        write(&theme.join("backgrounds/wall.png"), "ignored");
+
+        render_all(
+            &[],
+            &dir.path().join("user"),
+            &theme,
+            &out,
+            &HashMap::new(),
+            ThemeOrigin::Local,
+        )
+        .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(out.join("kitty.conf")).unwrap(),
+            "foreground #ffffff\n"
+        );
+        assert!(!out.join("backgrounds").exists());
+    }
+
+    #[test]
+    fn cloned_theme_drops_denylisted_files_symlinks_and_repo_clutter() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let templates = dir.path().join("templates");
+        let theme = dir.path().join("theme");
+        let out_cloned = dir.path().join("out-cloned");
+        let out_local = dir.path().join("out-local");
+        let secret = dir.path().join("outside.txt");
+
+        write(&secret, "TOP-SECRET");
+        write(
+            &templates.join("kitty.conf.tpl"),
+            "global kitty {{ accent }}\n",
+        );
+        write(&templates.join("neovim.lua.tpl"), "-- global nvim\n");
+
+        write(&theme.join(".git/HEAD"), "ref: refs/heads/main\n");
+        write(&theme.join(".git/objects/blob"), "obj");
+        write(&theme.join("README.md"), "# readme\n");
+        write(&theme.join("LICENSE-MIT"), "MIT\n");
+        write(&theme.join("preview.png"), "png");
+        write(&theme.join("preview-unlock.png"), "png");
+        write(&theme.join("unlock.png"), "png");
+        write(&theme.join("keyboard.rgb"), "rgb");
+        write(&theme.join("shell.toml"), "a = 1\n");
+        write(&theme.join("shell.bar.toml"), "b = 2\n");
+        write(&theme.join("kitty.conf"), "shell /bin/evil\n");
+        write(&theme.join("neovim.lua"), "os.execute('evil')\n");
+        write(&theme.join("alacritty.toml"), "evil\n");
+        write(&theme.join("foot.ini"), "evil\n");
+        write(&theme.join("ghostty.conf"), "evil\n");
+        write(&theme.join("vscode.json"), "{}\n");
+        write(&theme.join("sub/plugin.lua"), "evil\n");
+        write(&theme.join("foot.ini.tpl"), "evil tpl\n");
+        write(&theme.join("btop.theme"), "theme_background=\"#000000\"\n");
+        symlink(&secret, theme.join("linked.conf")).unwrap();
+
+        let vars = str_map(&[("accent", "#7aa2f7")]);
+
+        render_all(
+            std::slice::from_ref(&templates),
+            &dir.path().join("user"),
+            &theme,
+            &out_cloned,
+            &vars,
+            ThemeOrigin::Cloned,
+        )
+        .unwrap();
+
+        // Global templates win over dropped files in a cloned theme.
+        assert_eq!(
+            fs::read_to_string(out_cloned.join("kitty.conf")).unwrap(),
+            "global kitty #7aa2f7\n"
+        );
+        assert_eq!(
+            fs::read_to_string(out_cloned.join("neovim.lua")).unwrap(),
+            "-- global nvim\n"
+        );
+        // Safe colour file is still published.
+        assert!(out_cloned.join("btop.theme").is_file());
+        // Denied files, symlinks, and repo clutter are absent.
+        for absent in [
+            ".git",
+            "README.md",
+            "LICENSE-MIT",
+            "preview.png",
+            "preview-unlock.png",
+            "unlock.png",
+            "keyboard.rgb",
+            "shell.toml",
+            "shell.bar.toml",
+            "alacritty.toml",
+            "foot.ini",
+            "ghostty.conf",
+            "vscode.json",
+            "sub/plugin.lua",
+            "linked.conf",
+        ] {
+            assert!(
+                !out_cloned.join(absent).exists(),
+                "{absent} should not be published for cloned theme"
+            );
+        }
+
+        // Local themes keep symlinks and theme-shipped configs, while still skipping metadata/clutter.
+        render_all(
+            &[templates],
+            &dir.path().join("user"),
+            &theme,
+            &out_local,
+            &vars,
+            ThemeOrigin::Local,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(out_local.join("kitty.conf")).unwrap(),
+            "shell /bin/evil\n"
+        );
+        assert_eq!(
+            fs::read_to_string(out_local.join("linked.conf")).unwrap(),
+            "TOP-SECRET"
+        );
+        assert!(!out_local.join(".git").exists());
+        assert!(!out_local.join("README.md").exists());
+        assert!(!out_local.join("preview.png").exists());
     }
 }

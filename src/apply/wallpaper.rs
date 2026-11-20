@@ -169,7 +169,7 @@ fn list_files(dir: &Path) -> Vec<PathBuf> {
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
-                .filter(|p| p.is_file())
+                .filter(|p| crate::theme::is_wallpaper_image(p))
                 .collect()
         })
         .unwrap_or_default()
