@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use super::omarchy;
 use super::value::Value;
 use crate::theme::colors::{Rgb, parse_color};
 
@@ -15,6 +16,9 @@ pub fn eval_expr(
     values: &HashMap<String, Value>,
     overlay: &HashMap<String, Value>,
 ) -> Value {
+    if let Some(value) = omarchy::eval(expr, values, overlay) {
+        return value;
+    }
     let Ok(tokens) = lex(expr) else {
         return Value::Missing;
     };

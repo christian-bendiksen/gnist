@@ -7,15 +7,29 @@ use std::{collections::HashMap, fs, path::Path};
 ///
 /// Scalars become typed values (integers, floats, booleans, lists) while
 /// strings keep their raw spelling so plain `{{ key }}` output is unchanged.
+/// Derived `_strip`/`_rgb` forms are added in a separate pass after palette
+/// resolution via [`derive_all_color_keys`].
 pub fn build_vars_from_colors(colors_file: &Path) -> Result<HashMap<String, Value>> {
     let src = fs::read_to_string(colors_file)
         .with_context(|| format!("read {}", colors_file.display()))?;
 
-    let table: toml::Value = toml::from_str(&src).context("parse colors.toml")?;
+    build_vars_from_str(&src)
+}
+
+/// Parse a `colors.toml` source string into a flat typed variable map.
+pub fn build_vars_from_str(src: &str) -> Result<HashMap<String, Value>> {
+    let table: toml::Value = toml::from_str(src).context("parse colors.toml")?;
 
     let mut vars = HashMap::new();
     flatten("", &table, &mut vars);
+    Ok(vars)
+}
 
+/// Derive `_strip` and `_rgb` forms for every `#...` colour string in `vars`.
+///
+/// Runs after [`super::palette::resolve`] so derived palette aliases receive
+/// their stripped and decimal RGB forms too.
+pub fn derive_all_color_keys(vars: &mut HashMap<String, Value>) {
     // Collect first because the map cannot be extended while it is being iterated.
     let derived: Vec<(String, Value)> = vars
         .iter()
@@ -28,8 +42,9 @@ pub fn build_vars_from_colors(colors_file: &Path) -> Result<HashMap<String, Valu
         .flatten()
         .collect();
 
-    vars.extend(derived);
-    Ok(vars)
+    for (k, v) in derived {
+        vars.entry(k).or_insert(v);
+    }
 }
 
 /// Inject the render context that is not part of `colors.toml`.
@@ -39,11 +54,10 @@ pub fn inject_context(
     is_light: bool,
     wallpapers: &[String],
 ) {
+    let mode = if is_light { "light" } else { "dark" };
     vars.insert("name".to_owned(), Value::Str(name.to_owned()));
-    vars.insert(
-        "mode".to_owned(),
-        Value::Str(if is_light { "light" } else { "dark" }.to_owned()),
-    );
+    vars.insert("mode".to_owned(), Value::Str(mode.to_owned()));
+    vars.insert("theme_type".to_owned(), Value::Str(mode.to_owned()));
     vars.insert("is_light".to_owned(), Value::Bool(is_light));
     vars.insert(
         "colors".to_owned(),

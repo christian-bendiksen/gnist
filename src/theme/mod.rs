@@ -1,5 +1,6 @@
 mod border;
 pub mod colors;
+pub mod palette;
 mod vars;
 
 use crate::ctx::Ctx;
@@ -58,6 +59,8 @@ impl Theme {
 
         let mut vars = build_vars_from_colors(&colors_file)
             .with_context(|| format!("build vars for theme '{name}'"))?;
+        palette::resolve(&mut vars);
+        vars::derive_all_color_keys(&mut vars);
 
         let borders = border::resolve(&root);
         let active = borders
@@ -75,7 +78,7 @@ impl Theme {
         }
 
         let bg_dir = root.join("backgrounds");
-        let is_light = root.join("light.mode").is_file();
+        let is_light = resolve_is_light(&root, &vars);
         let wallpapers: Vec<String> = image_files(&bg_dir)
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -111,12 +114,13 @@ impl Theme {
     }
 
     pub fn stage(&self, stage: &Path) -> Result<()> {
-        for name in ["light.mode", "icons.theme"] {
-            let src = self.root.join(name);
-            if src.is_file() {
-                crate::util::symlink_force(&src, &stage.join(name))
-                    .with_context(|| format!("symlink {name}"))?;
-            }
+        if self.is_light {
+            fs::write(stage.join("light.mode"), b"").context("write light.mode")?;
+        }
+        let icons = self.root.join("icons.theme");
+        if icons.is_file() {
+            crate::util::symlink_force(&icons, &stage.join("icons.theme"))
+                .context("symlink icons.theme")?;
         }
         if let Some(bg) = &self.backgrounds_dir {
             crate::util::symlink_force(bg, &stage.join("backgrounds"))
@@ -124,6 +128,33 @@ impl Theme {
         }
         Ok(())
     }
+}
+
+/// Determine light/dark mode using Omarchy's precedence:
+/// 1. `mode` key (`"light"` / `"dark"`)
+/// 2. `theme_type` key (`"light"` / `"dark"`)
+/// 3. `light.mode` marker file
+/// 4. `background` luminance (`r + g + b > 382` is light)
+/// 5. dark
+fn resolve_is_light(root: &Path, vars: &HashMap<String, Value>) -> bool {
+    for key in ["mode", "theme_type"] {
+        if let Some(Value::Str(s)) = vars.get(key) {
+            match s.trim().to_ascii_lowercase().as_str() {
+                "light" => return true,
+                "dark" => return false,
+                _ => {}
+            }
+        }
+    }
+    if root.join("light.mode").is_file() {
+        return true;
+    }
+    if let Some(Value::Str(bg)) = vars.get("background")
+        && let Some([r, g, b]) = colors::parse_hex(bg)
+    {
+        return u16::from(r) + u16::from(g) + u16::from(b) > 382;
+    }
+    false
 }
 
 pub fn list_names(ctx: &Ctx) -> Result<Vec<String>> {
@@ -243,5 +274,83 @@ mod tests {
         let names = list_names_from_roots(&[config, user_data, system]).unwrap();
 
         assert_eq!(names, ["alpha", "middle", "shared", "zeta"]);
+    }
+
+    #[test]
+    fn mode_precedence_follows_omarchy_order() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // 1. mode key beats light.mode marker (dark key overrides marker).
+        let dark_with_marker = dir.path().join("dark-with-marker");
+        fs::create_dir_all(&dark_with_marker).unwrap();
+        fs::write(
+            dark_with_marker.join("colors.toml"),
+            "mode = \"dark\"\nbackground = \"#ffffff\"\n",
+        )
+        .unwrap();
+        fs::write(dark_with_marker.join("light.mode"), "").unwrap();
+        let theme = Theme::load_root(dark_with_marker, "dark-with-marker").unwrap();
+        assert!(!theme.is_light);
+        assert_eq!(theme.vars["mode"].display(), "dark");
+        assert_eq!(theme.vars["theme_type"].display(), "dark");
+
+        // 2. mode = "light" works without light.mode file, and stage writes light.mode.
+        let light_by_key = dir.path().join("light-by-key");
+        fs::create_dir_all(&light_by_key).unwrap();
+        fs::write(
+            light_by_key.join("colors.toml"),
+            "mode = \"light\"\nbackground = \"#101010\"\n",
+        )
+        .unwrap();
+        let theme = Theme::load_root(light_by_key, "light-by-key").unwrap();
+        assert!(theme.is_light);
+        assert_eq!(theme.vars["mode"].display(), "light");
+        assert_eq!(theme.vars["theme_type"].display(), "light");
+        let stage = dir.path().join("stage-light");
+        fs::create_dir_all(&stage).unwrap();
+        theme.stage(&stage).unwrap();
+        assert!(stage.join("light.mode").is_file());
+
+        // 3. theme_type beats marker and luminance.
+        let light_by_type = dir.path().join("light-by-type");
+        fs::create_dir_all(&light_by_type).unwrap();
+        fs::write(
+            light_by_type.join("colors.toml"),
+            "theme_type = \"light\"\nbackground = \"#000000\"\n",
+        )
+        .unwrap();
+        assert!(
+            Theme::load_root(light_by_type, "light-by-type")
+                .unwrap()
+                .is_light
+        );
+
+        // 4. light.mode marker beats dark background luminance.
+        let marker_beats_lum = dir.path().join("marker-beats-lum");
+        fs::create_dir_all(&marker_beats_lum).unwrap();
+        fs::write(
+            marker_beats_lum.join("colors.toml"),
+            "background = \"#000000\"\n",
+        )
+        .unwrap();
+        fs::write(marker_beats_lum.join("light.mode"), "").unwrap();
+        assert!(
+            Theme::load_root(marker_beats_lum, "marker-beats-lum")
+                .unwrap()
+                .is_light
+        );
+
+        // 5. Luminance threshold: r+g+b = 383 is light, 382 is dark.
+        // 0x80 + 0x80 + 0x7f = 128 + 128 + 127 = 383
+        let lum_383 = dir.path().join("lum-383");
+        fs::create_dir_all(&lum_383).unwrap();
+        fs::write(lum_383.join("colors.toml"), "background = \"#80807f\"\n").unwrap();
+        assert!(Theme::load_root(lum_383, "lum-383").unwrap().is_light);
+
+        // 0x80 + 0x7f + 0x7f = 128 + 127 + 127 = 382
+        let lum_382 = dir.path().join("lum-382");
+        fs::create_dir_all(&lum_382).unwrap();
+        fs::write(lum_382.join("colors.toml"), "background = \"#807f7f\"\n").unwrap();
+        assert!(!Theme::load_root(lum_382, "lum-382").unwrap().is_light);
     }
 }
