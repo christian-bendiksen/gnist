@@ -719,6 +719,263 @@ fn missing_wallpaper_socket_skips_awww_without_stalling() {
     );
 }
 
+#[test]
+fn omarchy4_cloned_and_local_theme_rendering_and_manifest() {
+    use std::os::unix::fs::symlink;
+
+    let g = Guarded::new();
+    let config = g.path("config");
+    let themes = config.join("gnist/themes");
+    let theme = themes.join("data/omatest");
+    let templates = themes.join("templates");
+    fs::create_dir_all(theme.join(".git/objects")).unwrap();
+    fs::create_dir_all(theme.join("backgrounds/intros")).unwrap();
+    fs::create_dir_all(&templates).unwrap();
+
+    fs::write(
+        theme.join("colors.toml"),
+        r##"mode = "light"
+name = "Oma Test"
+look = "omarchy"
+accent = "#7aa2f7"
+selection = "#292e42"
+muted = "#414868"
+background = "#f0f0f0"
+foreground = "#222222"
+bright_foreground = "#111111"
+red = "#f7768e"
+blue = "#7aa2f7"
+hyprland_active_border = "rgba(33ccffee) rgba(00ff99ee) 45deg"
+"##,
+    )
+    .unwrap();
+    fs::write(theme.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    fs::write(theme.join(".git/objects/blob"), "blob").unwrap();
+    fs::write(theme.join("kitty.conf"), "shell /bin/evil\n").unwrap();
+    fs::write(theme.join("neovim.lua"), "os.execute('evil')\n").unwrap();
+    fs::write(theme.join("README.md"), "# readme\n").unwrap();
+    fs::write(theme.join("LICENSE"), "MIT\n").unwrap();
+    fs::write(theme.join("preview.png"), "png").unwrap();
+    fs::write(theme.join("backgrounds/notes.txt"), "not a wallpaper\n").unwrap();
+    fs::write(theme.join("backgrounds/wall.png"), "png").unwrap();
+    fs::write(theme.join("backgrounds/intros/wall.mp4"), "video").unwrap();
+    let outside = g.path("outside.txt");
+    fs::write(&outside, "TOP-SECRET").unwrap();
+    symlink(&outside, theme.join("linked.conf")).unwrap();
+
+    fs::write(
+        templates.join("probe.conf.tpl"),
+        "color1={{ color1 }}\n\
+         cursor={{ cursor }}\n\
+         selbg={{ selection_background }}\n\
+         red={{ red }}\n\
+         mix={{ mix background foreground 15% }}\n\
+         mix_strip={{ mix_strip background accent 0.35 }}\n\
+         hypr={{ hypr_gradient hyprland_active_border accent }}\n\
+         shell={{ shell_gradient hyprland_active_border accent }}\n\
+         start={{ gradient_start hyprland_active_border accent }}\n\
+         mode={{ mode }}\n\
+         is_light={{ is_light }}\n",
+    )
+    .unwrap();
+    fs::write(
+        templates.join("kitty.conf.tpl"),
+        "global_kitty {{ color1 }}\n",
+    )
+    .unwrap();
+
+    // 1. Cloned (.git present) theme.
+    let set = g.run(&["set", "omatest", "--skip-apply"]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&set.stderr);
+    assert!(stderr.contains("warn:"), "expected warn line: {stderr}");
+    assert!(stderr.contains("kitty.conf"), "{stderr}");
+    assert!(stderr.contains("neovim.lua"), "{stderr}");
+    assert!(stderr.contains("linked.conf"), "{stderr}");
+
+    let probe = fs::read_to_string(themes.join("current/probe.conf")).unwrap();
+    assert!(!probe.contains("{{"), "unrendered placeholder in:\n{probe}");
+    assert!(probe.contains("color1=#f7768e\n"), "{probe}");
+    assert!(probe.contains("cursor=#111111\n"), "{probe}");
+    assert!(probe.contains("selbg=#292e42\n"), "{probe}");
+    assert!(probe.contains("mode=light\n"), "{probe}");
+    assert!(probe.contains("is_light=true\n"), "{probe}");
+    assert!(probe.contains("start=#33ccff\n"), "{probe}");
+    assert!(themes.join("current/light.mode").is_file());
+
+    // Cloned theme drops .git, README, LICENSE, preview, symlinks, and denied configs.
+    let live = themes.join("generated/live");
+    assert_eq!(
+        fs::read_to_string(live.join("kitty.conf")).unwrap(),
+        "global_kitty #f7768e\n"
+    );
+    for absent in [
+        ".git",
+        "README.md",
+        "LICENSE",
+        "preview.png",
+        "neovim.lua",
+        "linked.conf",
+    ] {
+        assert!(!live.join(absent).exists(), "{absent} leaked into live");
+    }
+
+    // palette.json manifest is published atomically in current/.
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(themes.join("current/palette.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["schema_version"], 1);
+    assert_eq!(manifest["name"], "omatest");
+    assert_eq!(manifest["display_name"], "Oma Test");
+    assert_eq!(manifest["mode"], "light");
+    assert_eq!(manifest["revision"], 1);
+    assert_eq!(manifest["colors"]["color1"], "#f7768e");
+    assert_eq!(manifest["colors"]["cursor"], "#111111");
+    assert_eq!(manifest["values"]["look"], "omarchy");
+    assert_eq!(
+        manifest["values"]["hyprland_active_border"],
+        "rgba(33ccffee) rgba(00ff99ee) 45deg"
+    );
+    let wallpapers = manifest["wallpapers"].as_array().unwrap();
+    assert_eq!(wallpapers.len(), 1);
+    assert!(wallpapers[0].as_str().unwrap().ends_with("wall.png"));
+
+    // gnist inspect agrees with palette.json and filters wallpapers.
+    let inspect = g.run(&["inspect", "omatest"]);
+    assert!(inspect.status.success());
+    let inspected: serde_json::Value = serde_json::from_slice(&inspect.stdout).unwrap();
+    let entry = &inspected["themes"][0];
+    assert_eq!(entry["id"], "omatest");
+    assert_eq!(entry["name"], "Oma Test");
+    assert_eq!(entry["light"], true);
+    assert_eq!(entry["mode"], "light");
+    assert_eq!(entry["generated"], false);
+    assert!(entry["preview"].as_str().unwrap().ends_with("preview.png"));
+    assert_eq!(entry["wallpapers"].as_array().unwrap().len(), 1);
+
+    // 2. Local theme (no .git): theme kitty.conf and symlink are kept, clutter still skipped.
+    fs::remove_dir_all(theme.join(".git")).unwrap();
+    let set_local = g.run(&["set", "omatest", "--skip-apply"]);
+    assert!(
+        set_local.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set_local.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(live.join("kitty.conf")).unwrap(),
+        "shell /bin/evil\n"
+    );
+    assert_eq!(
+        fs::read_to_string(live.join("linked.conf")).unwrap(),
+        "TOP-SECRET"
+    );
+    assert!(!live.join("README.md").exists());
+    assert!(!live.join("preview.png").exists());
+
+    let manifest2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(themes.join("current/palette.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest2["revision"], 2);
+}
+
+#[test]
+fn reload_propagates_theme_errors_and_set_is_quiet_without_bindings() {
+    let g = Guarded::new();
+    let config = g.path("config");
+
+    // No current theme -> gnist reload fails.
+    let missing = g.run(&["reload"]);
+    assert!(!missing.status.success());
+
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(themes.join("templates/gtk.css.tpl"), "window {}\n").unwrap();
+
+    // gnist set without bindings does NOT print "info: no reload bindings found".
+    let set = g.run(&[
+        "set",
+        "dusk",
+        "--skip-gnome",
+        "--skip-icons",
+        "--skip-wallpaper",
+    ]);
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&set.stderr).contains("no reload bindings found"),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    // Explicit gnist reload DOES print the notice when no bindings exist.
+    let reload = g.run(&["reload"]);
+    assert!(reload.status.success());
+    assert!(
+        String::from_utf8_lossy(&reload.stderr).contains("no reload bindings found"),
+        "{}",
+        String::from_utf8_lossy(&reload.stderr)
+    );
+
+    // Broken current theme -> gnist reload returns an error instead of empty vars.
+    fs::write(themes.join("data/dusk/colors.toml"), "not = [valid\n").unwrap();
+    let broken = g.run(&["reload"]);
+    assert!(
+        !broken.status.success(),
+        "gnist reload hid broken current theme"
+    );
+}
+
+#[test]
+fn hung_gsettings_times_out_and_still_emits_css_signal() {
+    let g = Guarded::new();
+    let config = g.path("config");
+    write_theme(&config, "dusk", "#123456");
+    let themes = config.join("gnist/themes");
+    fs::create_dir_all(themes.join("templates")).unwrap();
+    fs::write(themes.join("templates/gtk.css.tpl"), "window {}\n").unwrap();
+
+    // Stand-in gsettings that hangs indefinitely.
+    write_executable(&g.bin.join("gsettings"), "#!/bin/sh\nexec /bin/sleep 30\n");
+
+    let started = std::time::Instant::now();
+    let set = g.run(&[
+        "set",
+        "dusk",
+        "--skip-reload",
+        "--skip-icons",
+        "--skip-wallpaper",
+    ]);
+    let elapsed = started.elapsed();
+
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(8),
+        "hung gsettings stalled too long: {elapsed:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&set.stderr).contains("timed out"),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+    let calls = g.calls().unwrap_or_default();
+    assert!(
+        calls.contains("dbus-send --session --type=signal"),
+        "CSS change signal should still fire after gsettings timeout: {calls}"
+    );
+}
+
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;

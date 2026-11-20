@@ -10,7 +10,7 @@ const ATTACH_RETRIES: u32 = 50;
 const ATTACH_RETRY: Duration = Duration::from_millis(100);
 
 #[macro_export]
-macro_rules! ox_log {
+macro_rules! gio_log {
     ($($arg:tt)*) => {
         if $crate::config::debug_enabled() {
             eprintln!("[gnist-gio] {}", format_args!($($arg)*));
@@ -30,11 +30,11 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
 
     match symbols::detected_gtk() {
         None => {
-            ox_log!("host has no GTK symbols; skipping");
+            gio_log!("host has no GTK symbols; skipping");
             return;
         }
         Some((major, None)) => {
-            ox_log!("unsupported GTK major version {major}; skipping");
+            gio_log!("unsupported GTK major version {major}; skipping");
             return;
         }
         Some((_major, Some(_gtk))) => {}
@@ -47,7 +47,7 @@ pub unsafe extern "C" fn g_io_module_load(module: *mut c_void) {
         unsafe { g_type_module_use(module) };
     }
 
-    ox_log!(
+    gio_log!(
         "module loaded pid={} version={}",
         std::process::id(),
         config::VERSION
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn g_io_module_unload(_module: *mut c_void) {
     dbus::unsubscribe();
     layout::detach();
     style::cleanup();
-    ox_log!("module unloaded version={}", config::VERSION);
+    gio_log!("module unloaded version={}", config::VERSION);
 }
 
 /// Return this module's empty list of extension points.
@@ -90,7 +90,7 @@ fn attach_or_retry(attempt: u32) {
     };
 
     let Some(gtk) = gtk else {
-        ox_log!("unsupported GTK major version {major}; skipping");
+        gio_log!("unsupported GTK major version {major}; skipping");
         return;
     };
 
@@ -101,7 +101,7 @@ fn attach_or_retry(attempt: u32) {
         return;
     }
 
-    ox_log!(
+    gio_log!(
         "attach {gtk} display={} version={}",
         std::env::var("WAYLAND_DISPLAY").unwrap_or_default(),
         config::VERSION,
@@ -114,11 +114,11 @@ fn attach_or_retry(attempt: u32) {
 
 fn retry_or_skip(attempt: u32, reason: &'static str) {
     if attempt >= ATTACH_RETRIES {
-        ox_log!("{reason}; skipping");
+        gio_log!("{reason}; skipping");
         return;
     }
 
-    ox_log!("{reason}; retry {attempt}/{ATTACH_RETRIES}");
+    gio_log!("{reason}; retry {attempt}/{ATTACH_RETRIES}");
     glib::timeout_add_local(ATTACH_RETRY, move || {
         attach_or_retry(attempt + 1);
         glib::ControlFlow::Break

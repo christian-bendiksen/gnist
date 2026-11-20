@@ -5,7 +5,6 @@ use std::{fs, path::Path};
 ///
 /// Parent directories are created as needed. The final rename can replace a
 /// file or symlink at `link`, but not a directory.
-#[cfg(unix)]
 pub fn symlink_force(target: &Path, link: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
 
@@ -19,9 +18,4 @@ pub fn symlink_force(target: &Path, link: &Path) -> Result<()> {
 
     fs::rename(&tmp, link)
         .with_context(|| format!("atomic rename symlink into place {}", link.display()))
-}
-
-#[cfg(not(unix))]
-pub fn symlink_force(_target: &Path, _link: &Path) -> Result<()> {
-    anyhow::bail!("symlinks are not supported on this platform")
 }

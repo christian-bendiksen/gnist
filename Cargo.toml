@@ -43,6 +43,7 @@ literal_string_with_formatting_args = "allow"
 name = "gnist"
 version = "0.3.5"
 edition = "2024"
+rust-version.workspace = true
 description = "Atomic theme switcher for Wayland desktops"
 license = "MIT"
 

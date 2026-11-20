@@ -15,7 +15,7 @@ use std::time::Duration;
 use gio::prelude::*;
 use glib::translate::from_glib_none;
 
-use crate::{config::GtkApi, ox_log, symbols};
+use crate::{config::GtkApi, gio_log, symbols};
 
 pub const PROPERTY: &str = "gtk-herda-layout";
 pub const GROUP: &str = "GtkLayout";
@@ -81,7 +81,7 @@ impl Layout {
             Ok(bytes) => bytes,
             Err(error) => {
                 if error.kind() != std::io::ErrorKind::NotFound {
-                    ox_log!("layout file {} not read: {error}", path.display());
+                    gio_log!("layout file {} not read: {error}", path.display());
                 }
                 return Self::Native;
             }
@@ -90,11 +90,11 @@ impl Layout {
         if let Err(error) =
             file.load_from_bytes(&glib::Bytes::from_owned(bytes), glib::KeyFileFlags::NONE)
         {
-            ox_log!("layout file {} ignored: {error}", path.display());
+            gio_log!("layout file {} ignored: {error}", path.display());
             return Self::Native;
         }
         Self::from_key_file(&file).unwrap_or_else(|error| {
-            ox_log!("layout file {} ignored: {error}", path.display());
+            gio_log!("layout file {} ignored: {error}", path.display());
             Self::Native
         })
     }
@@ -193,7 +193,7 @@ fn rearm() {
     {
         Ok(monitor) => monitor,
         Err(error) => {
-            ox_log!("cannot watch {}: {error}", directory.display());
+            gio_log!("cannot watch {}: {error}", directory.display());
             return;
         }
     };
@@ -201,13 +201,13 @@ fn rearm() {
         if !concerns_layout(file, other) {
             return;
         }
-        ox_log!(
+        gio_log!(
             "layout event {event:?} {}",
             file.path().unwrap_or_default().display()
         );
         schedule_refresh();
     });
-    ox_log!("watching {}", directory.display());
+    gio_log!("watching {}", directory.display());
 
     WATCH.with(|state| {
         if let Some(previous) = state.replace(Some(Watch { directory, monitor })) {
@@ -266,10 +266,10 @@ pub fn refresh(reason: &str) {
     let layout = layout.nick();
     match unsupported {
         Some(why) if changed + unchanged == 0 => {
-            ox_log!("layout={layout} not published ({reason}): {why}")
+            gio_log!("layout={layout} not published ({reason}): {why}")
         }
-        _ if changed == 0 => ox_log!("layout={layout} unchanged ({reason})"),
-        _ => ox_log!("layout={layout} ({reason}) on {changed} display(s)"),
+        _ if changed == 0 => gio_log!("layout={layout} unchanged ({reason})"),
+        _ => gio_log!("layout={layout} ({reason}) on {changed} display(s)"),
     }
 }
 

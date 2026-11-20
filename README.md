@@ -35,7 +35,10 @@ gnist inspect dusk
 ```
 
 Both commands emit one JSON document with `schema_version: 1`, `current` and
-`themes`. Each theme includes its `id`, `light` mode, effective semantic `colors`,
+`themes`. Each theme includes its `id`, optional display `name` (from
+`theme.toml` or `colors.toml`), `light` / `mode`, `generated` (true when colors
+were synthesized in memory from a legacy terminal palette), optional `preview`
+path (`preview.png`), effective semantic `colors`, non-color scalar `values`,
 `icon_theme` and `wallpapers`. The same source precedence and derived values used
 for rendering are used for previews. A malformed installed theme carries an
 `error` without hiding other themes. Inspection does not render templates,
@@ -66,17 +69,34 @@ color8               = "#585b70"
 Only values used by your templates are required. String, integer, float, and
 boolean values are supported. Nested TOML keys are joined with underscores.
 
-For a light theme, add an empty `light.mode` file:
+For a light theme, set `mode = "light"` in `colors.toml` or add an empty
+`light.mode` file:
 
 ```sh
 touch "$GNIST_CONFIG/themes/data/dusk/light.mode"
 ```
 
+Light/dark mode is resolved in Omarchy's precedence order: `mode` key in
+`colors.toml`, then `theme_type`, then the `light.mode` file, then background
+luminance (`r + g + b > 382`), else dark. When a theme resolves to light, Gnist
+writes an empty `light.mode` into `themes/current/` so consumers checking that
+marker work even for marker-less Omarchy themes.
+
+Omarchy 4 semantic `colors.toml` palettes (defining `red`, `blue`, `muted`,
+`selection`, `bright_foreground`, etc. without `color0`..`color15`) are resolved
+via a fill-only alias cascade so both semantic and ANSI keys work in templates
+without overwriting any key a theme explicitly defined.
+
 Optional theme content includes:
 
-- `backgrounds/` for wallpapers
+- `backgrounds/` for wallpapers (`png`, `jpg`, `jpeg`, `webp`, `avif`, `jxl`, `gif`)
 - `icons.theme` containing a GTK icon theme name
+- `preview.png` exposed through `gnist inspect` (not copied into `current/`)
 - application files that should be copied without template expansion
+
+Omarchy extras with no Herda consumer (`keyboard.rgb`, `shell.toml`,
+`shell.<section>.toml`, `backgrounds/intros/`, `backgrounds/loops/`, icon sets)
+are left unpublished.
 
 ## Add templates
 
@@ -156,6 +176,12 @@ Color helpers derive new colors from a single palette:
 | `{{ accent \| lighten 0.1 }}` | `#95bcfb` |
 | `{{ accent \| darken 0.1 }}` | `#7ba2e1` |
 | `{{ accent \| mix background 0.5 }}` | `#546994` |
+| `{{ mix background foreground 15% }}` | Omarchy bare-word mix (`#rrggbb`) |
+| `{{ mix_strip background accent 0.35 }}` | Omarchy bare-word mix (`rrggbb`) |
+| `{{ mix_rgb background accent 50 }}` | Omarchy bare-word mix (`r,g,b`) |
+| `{{ hypr_gradient KEY FALLBACK }}` | Omarchy Hyprland/Lua gradient string or table |
+| `{{ shell_gradient KEY FALLBACK }}` | Omarchy space-separated gradient + angle |
+| `{{ gradient_start KEY FALLBACK }}` | First gradient colour as `#rrggbb` |
 | `{{ accent \| alpha 0.5 \| rgba }}` | `rgba(137,180,250,0.5)` |
 | `{{ accent \| rgb }}` | `137,180,250` |
 | `{{ accent \| invert }}` | `#764b05` |
@@ -335,11 +361,22 @@ Useful commands:
 ```sh
 gnist list
 gnist current
+gnist mode light
+gnist mode dark
+gnist mode toggle
+gnist reapply
+gnist reapply --wallpaper
+gnist remove NAME --yes
 gnist reload
 gnist wallpaper
 gnist wallpaper ~/Pictures/background.png
 gnist update
 ```
+
+`gnist mode light|dark|toggle` switches the active theme to its light or dark
+counterpart. `gnist reapply` re-renders and reapplies the current theme (skipping
+wallpaper by default unless `--wallpaper` is passed). `gnist remove NAME` deletes
+a config-installed theme (pass `--force` to remove the active theme).
 
 `gnist wallpaper` advances through the active theme's backgrounds. Pass an
 image path to select that file directly. Gnist waits briefly for the
@@ -348,11 +385,38 @@ symlink.
 
 Run `gnist COMMAND --help` for all command-specific options.
 
+## Integrating
+
+Desktop shells and session scripts that drive Gnist should rely on these four
+contracts:
+
+- **Resolved manifest (`themes/current/palette.json`).** Every publish writes a
+  resolved JSON manifest (`schema_version: 1`, `name`, `display_name`, `mode`,
+  monotonic `revision`, resolved `colors`, non-color scalar `values`,
+  `wallpapers`, `icon_theme`, `preview`, `generated`) into the staging tree so
+  it swaps atomically with all rendered configs when `themes/current` updates.
+  Consumers should read `palette.json` (and `gnist inspect` for non-current
+  themes) instead of parsing `colors.toml` directly.
+- **Light/dark mode switching (`gnist mode light|dark|toggle`).** Counterparts
+  are resolved from the theme's `light_theme` / `dark_theme` keys in
+  `colors.toml`, falling back to `<name>-light` / stripping `-light`.
+- **Interrupted-switch recovery (`gnist reapply [--wallpaper]`).** `gnist set`
+  and `gnist mode` render into a private stage first, write `current.theme`
+  atomically, and then commit the stage. If a switch is interrupted between
+  writing `current.theme` and committing, running `gnist reapply` at sign-in
+  completes the intended switch instead of reverting it.
+- **Busy lock exit status (`75`).** Publishing commands take an exclusive lock
+  (`themes/.gnist.lock`) for up to 20 seconds. If another Gnist process still
+  holds the lock past the limit, Gnist exits with status `75` (`EX_TEMPFAIL`) so
+  callers can retry or keep the current state. Each `gsettings` call is bounded
+  to 2 seconds, and wallpaper application runs after releasing the lock.
+
 ## Install themes from Git
 
 `gnist install URL` clones and immediately applies a theme repository. Only use
 repositories you trust. The repository must contain `colors.toml`, or a
-complete Kitty, Ghostty, or Alacritty palette that Gnist can convert.
+complete Kitty, Ghostty, or Alacritty palette that Gnist converts in memory
+without dirtying the clone.
 
 ```sh
 gnist install https://github.com/you/gnist-tokyo-night-theme.git
@@ -360,10 +424,19 @@ gnist update tokyo-night
 gnist set tokyo-night
 ```
 
-The example repository name becomes `tokyo-night`. Installing an existing name
-replaces that theme before cloning; use `gnist update` for an existing Git
-theme. `gnist update` only pulls changes, so run `gnist set` afterward to render
-and apply them.
+The example repository name becomes `tokyo-night`. Re-installing an existing
+name clones into a sibling temporary directory first and only replaces the
+installed theme after the clone succeeds, so a network failure preserves the
+previous theme. Use `gnist update` for an existing Git theme; it only pulls
+changes, so run `gnist set` or `gnist reapply` afterward to render and apply
+them.
+
+Git-cloned themes (directories containing `.git/`) are sandboxed at render time:
+Gnist skips `.git/`, repository clutter (`README*`, `LICENSE*`, `preview*.png`),
+all symlinks, and executable/application configs (`*.lua`, `alacritty.toml`,
+`foot.ini`, `ghostty.conf`, `kitty.conf`, `vscode.json`, plus theme `.tpl` files
+targeting them), emitting one `warn:` line and letting global templates render
+safe replacements.
 
 ## Directory layout
 

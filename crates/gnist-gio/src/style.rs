@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
-use crate::{config, config::GtkApi, config::Mode, ox_log, symbols};
+use crate::{config, config::GtkApi, config::Mode, gio_log, symbols};
 
 #[derive(Clone, Copy)]
 struct GObjectPtr(NonNull<c_void>);
@@ -115,13 +115,13 @@ pub fn attach(gtk: GtkApi) {
         if gtk.is_gtk3() {
             wait_for_display(gtk);
         } else {
-            ox_log!("{gtk} has no default display; skipping attach");
+            gio_log!("{gtk} has no default display; skipping attach");
         }
         return;
     };
 
     let Some(provider) = new_css_provider(symbols) else {
-        ox_log!("{gtk} failed to allocate GtkCssProvider");
+        gio_log!("{gtk} failed to allocate GtkCssProvider");
         return;
     };
 
@@ -135,10 +135,10 @@ pub fn attach(gtk: GtkApi) {
     if config::css_path_loadable(&path) {
         load_css(provider_ptr, &path, gtk);
     } else {
-        ox_log!("CSS not loadable at attach: {}", path.display());
+        gio_log!("CSS not loadable at attach: {}", path.display());
     }
 
-    ox_log!(
+    gio_log!(
         "attached {gtk} owner={:p} provider={:p} priority={priority} path={}",
         owner.as_ptr(),
         provider_ptr.as_ptr(),
@@ -160,7 +160,7 @@ pub fn update_and_reload(signal_path: &str, mode: Mode) {
         return;
     };
 
-    ox_log!(
+    gio_log!(
         "{} reload owner={:p} provider={:p} path={}",
         reload.gtk,
         reload.owner.as_ptr(),
@@ -216,7 +216,7 @@ pub fn update_and_reload(signal_path: &str, mode: Mode) {
         });
     }
 
-    ox_log!("fade started ms={transition}");
+    gio_log!("fade started ms={transition}");
 }
 
 pub fn cleanup() {
@@ -237,7 +237,7 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
     STYLE.with(|state| {
         let mut state = state.borrow_mut();
         let Some(style) = state.as_mut() else {
-            ox_log!("update_and_reload: provider was never attached");
+            gio_log!("update_and_reload: provider was never attached");
             return None;
         };
 
@@ -245,7 +245,7 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
             let candidate = config::css_path_for_gtk(style.gtk, Path::new(signal_path));
             if config::css_path_loadable(&candidate) {
                 if style.path != candidate {
-                    ox_log!(
+                    gio_log!(
                         "{} CSS path: {} -> {}",
                         style.gtk,
                         style.path.display(),
@@ -254,7 +254,7 @@ fn update_path(signal_path: &str) -> Option<ReloadTarget> {
                     style.path = candidate;
                 }
             } else {
-                ox_log!(
+                gio_log!(
                     "signal path not loadable, keeping: {}",
                     style.path.display()
                 );
@@ -299,7 +299,7 @@ fn reload_instant(reload: &ReloadTarget, mode: Mode, reason: &'static str) {
 fn reload_css_and_notify(reload: &ReloadTarget, reason: &'static str) {
     load_css(reload.provider, &reload.path, reload.gtk);
     notify_gtk_theme_two_phase(reason);
-    ox_log!(
+    gio_log!(
         "reloaded {} provider={:p} path={}",
         reload.gtk,
         reload.provider.as_ptr(),
@@ -312,28 +312,28 @@ fn load_css(provider: GObjectPtr, path: &Path, gtk: GtkApi) {
         return;
     };
     let Some(path) = path.to_str() else {
-        ox_log!("CSS path is not valid UTF-8: {}", path.display());
+        gio_log!("CSS path is not valid UTF-8: {}", path.display());
         return;
     };
     let Ok(c_path) = CString::new(path) else {
-        ox_log!("CSS path contains NUL: {path}");
+        gio_log!("CSS path contains NUL: {path}");
         return;
     };
 
     match gtk {
         GtkApi::Gtk4 => match symbols.gtk_css_provider_load_from_path_gtk4 {
             Some(load) => unsafe { load(provider.as_ptr(), c_path.as_ptr()) },
-            None => ox_log!("GTK4 load_from_path symbol missing"),
+            None => gio_log!("GTK4 load_from_path symbol missing"),
         },
         GtkApi::Gtk3 => match symbols.gtk_css_provider_load_from_path_gtk3 {
             Some(load) => {
                 let ok = unsafe { load(provider.as_ptr(), c_path.as_ptr(), std::ptr::null_mut()) };
-                ox_log!(
+                gio_log!(
                     "GTK3 load_from_path ok={ok} provider={:p} path={path}",
                     provider.as_ptr(),
                 );
             }
-            None => ox_log!("GTK3 load_from_path symbol missing"),
+            None => gio_log!("GTK3 load_from_path symbol missing"),
         },
     }
 }
@@ -377,7 +377,7 @@ fn apply_gtk3_mode(mode: Mode) {
                 std::ptr::null::<c_char>(),
             )
         };
-        ox_log!("GTK3 mode={mode} theme={theme} prefer-dark={prefer_dark}");
+        gio_log!("GTK3 mode={mode} theme={theme} prefer-dark={prefer_dark}");
     } else {
         unsafe {
             g_object_set(
@@ -387,7 +387,7 @@ fn apply_gtk3_mode(mode: Mode) {
                 std::ptr::null::<c_char>(),
             )
         };
-        ox_log!("GTK3 mode={mode} theme=unchanged prefer-dark={prefer_dark}");
+        gio_log!("GTK3 mode={mode} theme=unchanged prefer-dark={prefer_dark}");
     }
 }
 
@@ -395,7 +395,7 @@ fn notify_gtk_theme_two_phase(reason: &'static str) {
     notify_gtk_theme("phase=1");
     glib::idle_add_local_once(move || {
         notify_gtk_theme("phase=2");
-        ox_log!("theme notify complete: {reason}");
+        gio_log!("theme notify complete: {reason}");
     });
 }
 
@@ -419,7 +419,7 @@ fn notify_gtk_theme(phase: &str) {
             c"gtk-application-prefer-dark-theme".as_ptr(),
         );
     }
-    ox_log!("notified GtkSettings {phase}");
+    gio_log!("notified GtkSettings {phase}");
 }
 
 fn tick_fade() -> glib::ControlFlow {
@@ -460,7 +460,7 @@ fn tick_fade() -> glib::ControlFlow {
 
     if let Some((reload, _mode)) = midpoint_reload {
         reload_css_and_notify(&reload, "fade-midpoint");
-        ox_log!("fade midpoint: CSS swapped");
+        gio_log!("fade midpoint: CSS swapped");
     }
 
     if done {
@@ -606,14 +606,14 @@ fn attach_provider(
     match gtk {
         GtkApi::Gtk4 => {
             let Some(add_provider) = symbols.gtk_style_context_add_provider_for_display else {
-                ox_log!("GTK4 provider attach symbol missing");
+                gio_log!("GTK4 provider attach symbol missing");
                 return false;
             };
             unsafe { add_provider(owner.as_ptr(), provider.as_ptr(), priority) };
         }
         GtkApi::Gtk3 => {
             let Some(add_provider) = symbols.gtk_style_context_add_provider_for_screen else {
-                ox_log!("GTK3 provider attach symbol missing");
+                gio_log!("GTK3 provider attach symbol missing");
                 return false;
             };
             unsafe { add_provider(owner.as_ptr(), provider.as_ptr(), priority) };
@@ -651,7 +651,7 @@ fn wait_for_display(gtk: GtkApi) {
         )
     };
 
-    ox_log!("waiting for display-opened signal");
+    gio_log!("waiting for display-opened signal");
 }
 
 /// # Safety

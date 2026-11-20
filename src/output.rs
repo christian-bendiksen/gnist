@@ -74,28 +74,20 @@ pub fn warn(text: &str) -> String {
     theme().warn(text)
 }
 
-/// The marker for a change: `+` added, `-` removed, `~` changed.
-///
-/// `Removed` has no caller yet; it is here because the three belong together
-/// and a table that can only say two of them will grow a fourth spelling.
+/// The marker for a change: `+` added, `~` changed.
 #[must_use]
-#[allow(dead_code)]
 pub const fn marker(kind: Kind) -> (&'static str, Ink) {
     match kind {
         Kind::Added => (glyph::ADD, Ink::Green),
-        Kind::Removed => (glyph::REMOVE, Ink::Danger),
         Kind::Changed => (glyph::CHANGE, Ink::Gold),
     }
 }
 
 /// What happened to one thing in a list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum Kind {
     /// Newly there.
     Added,
-    /// Gone.
-    Removed,
     /// Already there, and left alone.
     Changed,
 }

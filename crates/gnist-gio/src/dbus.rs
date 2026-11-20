@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 
-use crate::{config::Mode, layout, ox_log, style};
+use crate::{config::Mode, gio_log, layout, style};
 
 struct Subscription {
     connection: gio::DBusConnection,
@@ -36,9 +36,9 @@ pub fn subscribe() {
                 SUBSCRIPTION.with(|state| {
                     state.replace(Some(Subscription { connection, id }));
                 });
-                ox_log!("subscribed to D-Bus signal");
+                gio_log!("subscribed to D-Bus signal");
             }
-            Err(error) => ox_log!("D-Bus connect failed: {error}"),
+            Err(error) => gio_log!("D-Bus connect failed: {error}"),
         },
     );
 }
@@ -53,12 +53,12 @@ pub fn unsubscribe() {
 
 fn handle_changed(parameters: &glib::Variant) {
     let Some((revision, css_path, mode)) = parameters.get::<(u64, String, String)>() else {
-        ox_log!("ignored malformed Appearance1.Changed signal");
+        gio_log!("ignored malformed Appearance1.Changed signal");
         return;
     };
 
     let mode = Mode::parse(&mode);
-    ox_log!("signal revision={revision} path={css_path} mode={mode}");
+    gio_log!("signal revision={revision} path={css_path} mode={mode}");
 
     style::update_and_reload(&css_path, mode);
     // The layout file is the authority; a theme change is a chance to recover
