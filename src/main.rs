@@ -207,10 +207,8 @@ fn run() -> Result<()> {
         }
         Cmd::Update { theme } => cmd_update(&ctx, theme.as_deref()),
         Cmd::Reload => {
-            let values = Theme::load_current(&ctx)
-                .map(|theme| theme.vars)
-                .unwrap_or_default();
-            apply::reload::run(&ctx, &values);
+            let theme = Theme::load_current(&ctx)?;
+            apply::reload::run(&ctx, &theme.vars, true);
             Ok(())
         }
         Cmd::Gnome { skip_icons } => {
@@ -292,8 +290,12 @@ fn cmd_init(ctx: &Ctx) -> Result<()> {
 }
 
 fn cmd_set(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> {
-    let _lock = lock_themes(ctx)?;
-    set_theme(ctx, theme_name, flags)
+    let theme = {
+        let _lock = lock_themes(ctx)?;
+        set_theme(ctx, theme_name, flags)?
+    };
+    apply_wallpaper_if_enabled(ctx, &theme, flags);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -311,7 +313,7 @@ thread_local! {
 /// published. A switch stopped between the last two leaves the old render on
 /// screen with the new name, and the next `gnist reapply` (at sign-in and on
 /// every update) completes it instead of silently reverting it.
-fn set_theme(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()> {
+fn set_theme(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<Theme> {
     let theme = Theme::load(ctx, theme_name).context("load theme")?;
 
     let txn = stage_theme(ctx, &theme)?;
@@ -330,14 +332,20 @@ fn set_theme(ctx: &Ctx, theme_name: &str, flags: apply::ApplyFlags) -> Result<()
     }
 
     txn.commit().context("commit transaction")?;
-    apply_theme(ctx, &theme, flags)
+    apply_theme(ctx, &theme, flags)?;
+    Ok(theme)
 }
 
 fn cmd_reapply(ctx: &Ctx, flags: apply::ApplyFlags) -> Result<()> {
-    let _lock = lock_themes(ctx)?;
-    let theme = Theme::load_current(ctx)?;
-    publish_theme(ctx, &theme)?;
-    apply_theme(ctx, &theme, flags)
+    let theme = {
+        let _lock = lock_themes(ctx)?;
+        let theme = Theme::load_current(ctx)?;
+        publish_theme(ctx, &theme)?;
+        apply_theme(ctx, &theme, flags)?;
+        theme
+    };
+    apply_wallpaper_if_enabled(ctx, &theme, flags);
+    Ok(())
 }
 
 /// Serializes the commands that publish a render or write `current.theme`.
@@ -410,7 +418,24 @@ fn stage_theme(ctx: &Ctx, theme: &Theme) -> Result<Transaction> {
     )
     .context("render templates")?;
     theme.stage(txn.stage()).context("stage assets")?;
+    let revision = next_palette_revision(ctx).context("advance palette revision")?;
+    inspect::write_palette_manifest(txn.stage(), theme, revision).context("write palette.json")?;
     Ok(txn)
+}
+
+fn next_palette_revision(ctx: &Ctx) -> Result<u64> {
+    let runtime_dir = ctx.config_dir.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("create {}", runtime_dir.display()))?;
+    let revision_file = runtime_dir.join("palette.revision");
+    let previous = std::fs::read_to_string(&revision_file)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let next = previous.saturating_add(1);
+    write_atomic(&revision_file, format!("{next}\n").as_bytes())
+        .with_context(|| format!("write {}", revision_file.display()))?;
+    Ok(next)
 }
 
 fn publish_theme(ctx: &Ctx, theme: &Theme) -> Result<()> {
@@ -437,7 +462,7 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
         // integrations moving, but make the missing platform settings visible.
         eprintln!(
             "{}",
-            output::warn(&format!("accessibility settings failed: {error:#}"))
+            output::warn(&format!("desktop settings failed: {error:#}"))
         );
     }
 
@@ -446,19 +471,24 @@ fn apply_theme(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) -> Result<()>
     }
 
     if !flags.skip_reload {
-        apply::reload::run(ctx, &theme.vars);
+        apply::reload::run(ctx, &theme.vars, false);
     }
 
-    if !flags.skip_wallpaper
-        && let Err(e) = apply::wallpaper::show_for_theme(ctx, theme)
-    {
+    Ok(())
+}
+
+/// Apply the theme's wallpaper outside the theme lock (it only updates
+/// `themes/background` and waits on the wallpaper daemon).
+fn apply_wallpaper_if_enabled(ctx: &Ctx, theme: &Theme, flags: apply::ApplyFlags) {
+    if flags.skip_apply || flags.skip_wallpaper {
+        return;
+    }
+    if let Err(e) = apply::wallpaper::show_for_theme(ctx, theme) {
         eprintln!(
             "{}",
             output::warn(&format!("wallpaper apply failed: {e:#}"))
         );
     }
-
-    Ok(())
 }
 
 fn cmd_list(ctx: &Ctx) -> Result<()> {
@@ -526,26 +556,33 @@ fn cmd_remove(
         return Ok(());
     }
 
-    let _lock = lock_themes(ctx)?;
-    if removing_current {
-        if let Some(theme) = fallback {
-            publish_theme(ctx, &theme).context("publish lower-precedence replacement theme")?;
-            std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
-            remove_file_if_exists(&ctx.background_link)?;
-            apply_theme(
-                ctx,
-                &theme,
-                ApplyFlags {
+    let wallpaper_target = {
+        let _lock = lock_themes(ctx)?;
+        if removing_current {
+            if let Some(theme) = fallback {
+                publish_theme(ctx, &theme).context("publish lower-precedence replacement theme")?;
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+                remove_file_if_exists(&ctx.background_link)?;
+                let fallback_flags = ApplyFlags {
                     skip_wallpaper: false,
                     ..apply_flags
-                },
-            )?;
+                };
+                apply_theme(ctx, &theme, fallback_flags)?;
+                Some((theme, fallback_flags))
+            } else {
+                std::fs::remove_dir_all(&path)
+                    .with_context(|| format!("remove {}", path.display()))?;
+                clear_current_state(ctx)?;
+                None
+            }
         } else {
             std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
-            clear_current_state(ctx)?;
+            None
         }
-    } else {
-        std::fs::remove_dir_all(&path).with_context(|| format!("remove {}", path.display()))?;
+    };
+    if let Some((theme, fallback_flags)) = wallpaper_target {
+        apply_wallpaper_if_enabled(ctx, &theme, fallback_flags);
     }
 
     println!("Removed {name}");
@@ -732,25 +769,29 @@ fn counterpart(ctx: &Ctx, theme: &Theme, want_light: bool) -> Result<String> {
 }
 
 fn cmd_mode(ctx: &Ctx, mode: ModeArg, flags: apply::ApplyFlags) -> Result<()> {
-    let _lock = lock_themes(ctx)?;
-    // Read under the lock: a second toggle sees the first one's result.
-    let current = read_current_name(ctx).context("no current theme: run `gnist set` first")?;
-    let theme =
-        Theme::load(ctx, &current).with_context(|| format!("load current theme '{current}'"))?;
-    let want_light = match mode {
-        ModeArg::Light => true,
-        ModeArg::Dark => false,
-        ModeArg::Toggle => !theme.is_light,
+    let switched = {
+        let _lock = lock_themes(ctx)?;
+        // Read under the lock: a second toggle sees the first one's result.
+        let current = read_current_name(ctx).context("no current theme: run `gnist set` first")?;
+        let theme = Theme::load(ctx, &current)
+            .with_context(|| format!("load current theme '{current}'"))?;
+        let want_light = match mode {
+            ModeArg::Light => true,
+            ModeArg::Dark => false,
+            ModeArg::Toggle => !theme.is_light,
+        };
+        if want_light == theme.is_light {
+            println!(
+                "{current} is already {}",
+                if want_light { "light" } else { "dark" }
+            );
+            return Ok(());
+        }
+        let target = counterpart(ctx, &theme, want_light)?;
+        set_theme(ctx, &target, flags)?
     };
-    if want_light == theme.is_light {
-        println!(
-            "{current} is already {}",
-            if want_light { "light" } else { "dark" }
-        );
-        return Ok(());
-    }
-    let target = counterpart(ctx, &theme, want_light)?;
-    set_theme(ctx, &target, flags)
+    apply_wallpaper_if_enabled(ctx, &switched, flags);
+    Ok(())
 }
 
 fn read_current_name(ctx: &Ctx) -> Option<String> {

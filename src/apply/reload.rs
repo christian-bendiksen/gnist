@@ -17,14 +17,16 @@ enum ReloadAction {
     Touch { path: PathBuf },
 }
 
-pub fn run(ctx: &Ctx, values: &HashMap<String, Value>) {
+pub fn run(ctx: &Ctx, values: &HashMap<String, Value>, notify_empty: bool) {
     let paths = binding_paths(&ctx.config_dir);
 
     let Some((actions, warnings)) = parse_reload_files(&paths, values) else {
-        eprintln!(
-            "info: no reload bindings found in {}",
-            ctx.config_dir.display()
-        );
+        if notify_empty {
+            eprintln!(
+                "info: no reload bindings found in {}",
+                ctx.config_dir.display()
+            );
+        }
         return;
     };
 
@@ -160,8 +162,14 @@ fn execute_action(action: ReloadAction) {
             spawn_detached(&cmd, &arg_refs);
         }
         ReloadAction::Touch { path } => {
-            spawn_detached("touch", &[&path.to_string_lossy()]);
+            touch_file(&path);
         }
+    }
+}
+
+fn touch_file(path: &Path) {
+    if let Ok(file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
     }
 }
 
@@ -305,5 +313,28 @@ mod tests {
         assert!(actions.is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("bindings.kdl"));
+    }
+
+    #[test]
+    fn touch_file_creates_missing_file_and_updates_mtime_in_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("reload.stamp");
+        assert!(!target.exists());
+
+        super::touch_file(&target);
+        assert!(target.is_file());
+
+        let old_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        assert_eq!(fs::metadata(&target).unwrap().modified().unwrap(), old_time);
+
+        super::touch_file(&target);
+        assert!(fs::metadata(&target).unwrap().modified().unwrap() > old_time);
     }
 }

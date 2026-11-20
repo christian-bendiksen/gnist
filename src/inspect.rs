@@ -1,9 +1,10 @@
-//! Side-effect-free palette data for desktop previews. Uses the same source
-//! precedence and derived values as rendering, never a second theme parser.
+//! Side-effect-free palette data for desktop previews and the published
+//! `palette.json` manifest. Uses the same source precedence and derived values
+//! as rendering, never a second theme parser.
 use crate::{Ctx, Theme, render::value::Value, theme};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value as JsonValue, json};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 const SCHEMA_VERSION: u64 = 1;
 
@@ -20,6 +21,33 @@ fn extract_colors(theme: &Theme) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Extract non-colour scalars (`look`, `light_theme`, `dark_theme`, `*_alpha`, …).
+fn extract_values(theme: &Theme) -> BTreeMap<String, JsonValue> {
+    theme
+        .vars
+        .iter()
+        .filter(|(key, _)| {
+            !key.ends_with("_strip")
+                && !key.ends_with("_rgb")
+                && !matches!(
+                    key.as_str(),
+                    "name" | "mode" | "theme_type" | "is_light" | "colors" | "wallpapers"
+                )
+        })
+        .filter_map(|(key, value)| match value {
+            Value::Str(s) if theme::colors::parse_color(s).is_none() => {
+                Some((key.clone(), JsonValue::String(s.clone())))
+            }
+            Value::Int(i) => Some((key.clone(), json!(i))),
+            Value::Float(f) => {
+                serde_json::Number::from_f64(*f).map(|num| (key.clone(), JsonValue::Number(num)))
+            }
+            Value::Bool(b) => Some((key.clone(), JsonValue::Bool(*b))),
+            _ => None,
+        })
+        .collect()
+}
+
 fn extract_wallpapers(theme: &Theme) -> Vec<String> {
     theme
         .vars
@@ -31,21 +59,54 @@ fn extract_wallpapers(theme: &Theme) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn inspect_entry(theme: &Theme, current: &str) -> JsonValue {
-    let mode = if theme.is_light { "light" } else { "dark" };
-    let preview = theme
+fn mode_str(theme: &Theme) -> &'static str {
+    if theme.is_light { "light" } else { "dark" }
+}
+
+fn preview_str(theme: &Theme) -> Option<String> {
+    theme
         .preview
         .as_ref()
-        .map(|p| p.to_string_lossy().into_owned());
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Build the published `palette.json` manifest (schema_version 1).
+pub fn palette_manifest(theme: &Theme, revision: u64) -> JsonValue {
+    json!({
+        "schema_version": SCHEMA_VERSION,
+        "name": theme.name,
+        "display_name": theme.display_name,
+        "mode": mode_str(theme),
+        "revision": revision,
+        "colors": extract_colors(theme),
+        "values": extract_values(theme),
+        "wallpapers": extract_wallpapers(theme),
+        "icon_theme": theme.icon_theme,
+        "preview": preview_str(theme),
+        "generated": theme.generated,
+    })
+}
+
+/// Write `palette.json` into the staging directory so it becomes visible
+/// atomically with the rest of the rendered tree.
+pub fn write_palette_manifest(stage: &Path, theme: &Theme, revision: u64) -> Result<()> {
+    let manifest = palette_manifest(theme, revision);
+    let mut bytes = serde_json::to_vec_pretty(&manifest).context("serialize palette.json")?;
+    bytes.push(b'\n');
+    std::fs::write(stage.join("palette.json"), bytes).context("write palette.json")
+}
+
+fn inspect_entry(theme: &Theme, current: &str) -> JsonValue {
     json!({
         "id": theme.name,
         "name": theme.display_name,
         "current": current == theme.name,
         "light": theme.is_light,
-        "mode": mode,
+        "mode": mode_str(theme),
         "generated": theme.generated,
-        "preview": preview,
+        "preview": preview_str(theme),
         "colors": extract_colors(theme),
+        "values": extract_values(theme),
         "icon_theme": theme.icon_theme,
         "wallpapers": extract_wallpapers(theme),
     })

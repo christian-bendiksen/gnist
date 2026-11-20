@@ -19,8 +19,15 @@ use crate::render::value::Value;
 use crate::theme::Theme;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Upper bound on any single `gsettings` invocation so a hung dconf cannot hold
+/// the theme lock for the full 20 s lock window.
+const GSETTINGS_TIMEOUT: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 struct Extra {
     key: String,
@@ -146,22 +153,22 @@ pub fn run(ctx: &Ctx, theme: &Theme, skip_icons: bool) -> Result<()> {
 
     // `libgnist_gio` notifies Chromium when CSS changes, so cycling through an
     // intermediate GTK theme would only add a white flash to the fade.
-    gsettings_set(&cfg.schema, &cfg.color_scheme_key, color_scheme);
+    gsettings_set(&cfg.schema, &cfg.color_scheme_key, color_scheme)?;
     if accessibility.is_none()
         || cfg.schema != "org.gnome.desktop.interface"
         || cfg.gtk_theme_key != "gtk-theme"
     {
         // Keep a theme's nonstandard settings target as well; the standard
         // GTK key is applied last below when accessibility is present.
-        gsettings_set(&cfg.schema, &cfg.gtk_theme_key, gtk_theme);
+        gsettings_set(&cfg.schema, &cfg.gtk_theme_key, gtk_theme)?;
     }
 
     if !skip_icons && let Some(icon) = theme.icon_theme.as_deref() {
-        gsettings_set(&cfg.schema, &cfg.icon_theme_key, icon);
+        gsettings_set(&cfg.schema, &cfg.icon_theme_key, icon)?;
     }
 
     for row in &cfg.extra {
-        gsettings_set(&cfg.schema, &row.key, &row.value);
+        gsettings_set(&cfg.schema, &row.key, &row.value)?;
     }
 
     if let Some(a11y) = &accessibility {
@@ -262,12 +269,12 @@ fn gvariant_string(output: &str) -> Option<String> {
 
 fn required_setting(schema: &str, key: &str, value: RequiredValue<'_>) -> Result<()> {
     let argument = value.as_argument();
-    let write = Command::new("gsettings")
+    let mut write_cmd = Command::new("gsettings");
+    write_cmd
         .args(["set", schema, key, &argument])
         // Keep dconf's otherwise localized commit diagnostic recognizable.
-        .env("LC_ALL", "C")
-        .stdin(Stdio::null())
-        .output()
+        .env("LC_ALL", "C");
+    let write = output_with_timeout(&mut write_cmd, GSETTINGS_TIMEOUT)
         .with_context(|| format!("run gsettings for {schema} {key}"))?;
     let diagnostic = String::from_utf8_lossy(&write.stderr);
     if !write.status.success() || diagnostic.contains("failed to commit changes to dconf") {
@@ -279,10 +286,9 @@ fn required_setting(schema: &str, key: &str, value: RequiredValue<'_>) -> Result
     }
     // dconf can reject a write while gsettings set exits successfully. Read
     // from a separate process so it cannot return a local optimistic cache.
-    let readback = Command::new("gsettings")
-        .args(["get", schema, key])
-        .stdin(Stdio::null())
-        .output()
+    let mut read_cmd = Command::new("gsettings");
+    read_cmd.args(["get", schema, key]);
+    let readback = output_with_timeout(&mut read_cmd, GSETTINGS_TIMEOUT)
         .with_context(|| format!("read gsettings for {schema} {key}"))?;
     if !readback.status.success() {
         bail!(
@@ -301,14 +307,84 @@ fn required_setting(schema: &str, key: &str, value: RequiredValue<'_>) -> Result
     Ok(())
 }
 
-fn gsettings_set(schema: &str, key: &str, value: &str) {
-    Command::new("gsettings")
-        .args(["set", schema, key, value])
+fn gsettings_set(schema: &str, key: &str, value: &str) -> Result<()> {
+    let mut cmd = Command::new("gsettings");
+    cmd.args(["set", schema, key, value]);
+    match status_with_timeout(&mut cmd, GSETTINGS_TIMEOUT) {
+        Ok(_status) => Ok(()),
+        Err(TimeoutOrIo::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(TimeoutOrIo::Io(_)) => Ok(()),
+        Err(TimeoutOrIo::TimedOut) => bail!(
+            "gsettings timed out after {:.1} s for {schema} {key}",
+            GSETTINGS_TIMEOUT.as_secs_f64()
+        ),
+    }
+}
+
+enum TimeoutOrIo {
+    TimedOut,
+    Io(std::io::Error),
+}
+
+fn status_with_timeout(
+    cmd: &mut Command,
+    timeout: Duration,
+) -> std::result::Result<ExitStatus, TimeoutOrIo> {
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .ok();
+        .spawn()
+        .map_err(TimeoutOrIo::Io)?;
+    wait_child(&mut child, timeout)
+}
+
+fn output_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output> {
+    let mut stdout_file = tempfile::tempfile().context("create temp stdout")?;
+    let mut stderr_file = tempfile::tempfile().context("create temp stderr")?;
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_file.try_clone()?))
+        .stderr(Stdio::from(stderr_file.try_clone()?))
+        .spawn()?;
+
+    let status = match wait_child(&mut child, timeout) {
+        Ok(status) => status,
+        Err(TimeoutOrIo::TimedOut) => {
+            bail!("timed out after {:.1} s", timeout.as_secs_f64())
+        }
+        Err(TimeoutOrIo::Io(err)) => return Err(err.into()),
+    };
+
+    stdout_file.seek(SeekFrom::Start(0))?;
+    stderr_file.seek(SeekFrom::Start(0))?;
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    stdout_file.read_to_end(&mut stdout)?;
+    stderr_file.read_to_end(&mut stderr)?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn wait_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::result::Result<ExitStatus, TimeoutOrIo> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait().map_err(TimeoutOrIo::Io)? {
+            Some(status) => return Ok(status),
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(TimeoutOrIo::TimedOut);
+            }
+            None => std::thread::sleep(POLL_INTERVAL),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -390,5 +466,34 @@ mod tests {
         assert_eq!(cfg.dark_theme, "adw-gtk3-dark");
         assert_eq!(cfg.extra[0].key, "accent-color");
         assert_eq!(cfg.extra[0].value, "#89b4fa");
+    }
+
+    #[test]
+    fn hung_child_is_killed_at_timeout_and_fast_child_captures_output() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let mut fast = Command::new("/bin/sh");
+        fast.args(["-c", "printf out; printf err >&2"]);
+        let out = super::output_with_timeout(&mut fast, Duration::from_secs(2)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"out");
+        assert_eq!(out.stderr, b"err");
+
+        let mut hung = Command::new("/bin/sh");
+        hung.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        let err = super::output_with_timeout(&mut hung, Duration::from_millis(150)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(err.to_string().contains("timed out"), "{err:#}");
+
+        let mut hung_status = Command::new("/bin/sh");
+        hung_status.args(["-c", "exec sleep 30"]);
+        let started = Instant::now();
+        assert!(matches!(
+            super::status_with_timeout(&mut hung_status, Duration::from_millis(150)),
+            Err(super::TimeoutOrIo::TimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }
